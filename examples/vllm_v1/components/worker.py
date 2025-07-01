@@ -44,8 +44,16 @@ class VllmBaseWorker:
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(class_name, "")
 
+<<<<<<< Updated upstream
         signal.signal(signal.SIGTERM, self.graceful_shutdown)
         signal.signal(signal.SIGINT, self.graceful_shutdown)
+=======
+        if self.engine_args.pipeline_parallel_size != 1:
+            raise ValueError("Pipeline parallel size is not supported yet, setting to 1")
+
+        signal.signal(signal.SIGTERM, self.shutdown_vllm_engine)
+        signal.signal(signal.SIGINT, self.shutdown_vllm_engine)
+>>>>>>> Stashed changes
 
         self.set_side_channel_host_and_port()
 
