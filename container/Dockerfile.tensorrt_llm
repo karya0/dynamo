@@ -51,6 +51,7 @@ ENV NIXL_SRC_DIR=/opt/nixl
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+ENV LD_LIBRARY_PATH=$NIXL_LIB_DIR:$NIXL_PLUGIN_DIR:$LD_LIBRARY_PATH
 
 USER root
 
@@ -334,7 +335,6 @@ RUN pip install dist/ai_dynamo_runtime*cp312*.whl  && \
     pip install dist/ai_dynamo*any.whl
 
 ENV DYNAMO_HOME=/workspace
-ENV LD_LIBRARY_PATH=$NIXL_LIB_DIR:$NIXL_PLUGIN_DIR:$LD_LIBRARY_PATH
 
 # Use UCX for TRTLLM KV Cache Transfer
 ARG TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL

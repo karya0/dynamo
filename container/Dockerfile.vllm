@@ -83,8 +83,10 @@ ARG NIXL_REF=3c47a48955e6f96bd5d4fb43a9d80bb64722f8e4
 
 ENV NIXL_SRC_DIR=/opt/nixl
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ARG ARCH_ALT
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+ENV LD_LIBRARY_PATH=$NIXL_LIB_DIR:$NIXL_PLUGIN_DIR:$LD_LIBRARY_PATH
 
 WORKDIR /workspace
 
@@ -382,7 +384,6 @@ WORKDIR /workspace
 
 COPY --from=wheel_builder /workspace /workspace
 COPY --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
-ENV LD_LIBRARY_PATH=$NIXL_LIB_DIR:$NIXL_PLUGIN_DIR:$LD_LIBRARY_PATH
 
 # Copy Cargo cache to avoid re-downloading dependencies
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
