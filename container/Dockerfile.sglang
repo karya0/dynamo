@@ -154,8 +154,7 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 # TEMP: disable gds backend for arm64
 RUN if [ "$ARCH" = "arm64" ]; then \
         cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl \
-        --config-settings=setup-args="-Ddisable_gds_backend=true" \
-        --config-settings=setup-args="-Dgds_path=/usr/local/cuda/targets/sbsa-linux"; \
+        --config-settings=setup-args="-Ddisable_gds_backend=true -Dgds_path=/usr/local/cuda/targets/sbsa-linux"; \
     else \
         cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl; \
     fi && \
@@ -290,6 +289,9 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 # Use build arg RELEASE_BUILD = true to generate wheels for Python 3.10, 3.11 and 3.12.
 ARG RELEASE_BUILD
 
+# Keep in sync with the base image.
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+
 WORKDIR /workspace
 
 RUN yum update -y \
@@ -416,13 +418,17 @@ ENV PATH=/usr/local/bin/etcd/:$PATH
 
 # Copy UCX from base image as plugin for NIXL
 # Copy NIXL source from wheel_builder image
+ARG ARCH_ALT
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+
 COPY --from=base /usr/local/ucx /usr/local/ucx
 COPY --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
-ARG ARCH_ALT
-ENV NIXL_PLUGIN_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu/plugins
+
 ENV LD_LIBRARY_PATH=\
-$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu:\
-$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu/plugins:\
+$NIXL_LIB_DIR:\
+$NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
 $LD_LIBRARY_PATH

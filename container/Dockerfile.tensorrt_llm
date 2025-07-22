@@ -219,8 +219,7 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv
 # TEMP: disable gds backend for arm64
 RUN if [ "$ARCH" = "arm64" ]; then \
         cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl \
-        --config-settings=setup-args="-Ddisable_gds_backend=true" \
-        --config-settings=setup-args="-Dgds_path=/usr/local/cuda/targets/sbsa-linux"; \
+        --config-settings=setup-args="-Ddisable_gds_backend=true -Dgds_path=/usr/local/cuda/targets/sbsa-linux"; \
     else \
         cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl; \
     fi && \
@@ -242,6 +241,9 @@ ARG CARGO_BUILD_JOBS
 # This is to prevent cargo from building $(nproc) jobs in parallel,
 # which might exceed the number of opened files limit.
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
+
+# Keep in sync with the base image.
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 
 WORKDIR /workspace
 
@@ -461,10 +463,14 @@ COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn-${FLASH_ATT
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-*-linux-gnu.so /usr/local/lib/python3.12/dist-packages/
 
 # Setup environment variables
-ENV NIXL_PLUGIN_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu/plugins
+ARG ARCH_ALT
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+
 ENV LD_LIBRARY_PATH=\
-$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu:\
-$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu/plugins:\
+$NIXL_LIB_DIR:\
+$NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
 /opt/hpcx/ompi/lib:\
