@@ -483,6 +483,7 @@ impl MatchDetails {
         self.kv_transfer_candidates = Some(KvTransferCandidates {
             block_hashes,
             owner_prefix_blocks,
+            owner_ranges: Vec::new(),
             routing_snapshot: None,
         });
     }

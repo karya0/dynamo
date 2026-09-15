@@ -2924,6 +2924,7 @@ mod tests {
         )
         .await;
         let candidates = KvTransferCandidates {
+            owner_ranges: Vec::new(),
             block_hashes: vec![
                 ExternalSequenceBlockHash(101),
                 ExternalSequenceBlockHash(102),
@@ -2976,6 +2977,7 @@ mod tests {
             )
             .await;
             let candidates = KvTransferCandidates {
+                owner_ranges: Vec::new(),
                 block_hashes: vec![
                     ExternalSequenceBlockHash(101),
                     ExternalSequenceBlockHash(102),
@@ -3015,6 +3017,7 @@ mod tests {
         )
         .await;
         let candidates = KvTransferCandidates {
+            owner_ranges: Vec::new(),
             block_hashes: vec![
                 ExternalSequenceBlockHash(101),
                 ExternalSequenceBlockHash(102),
@@ -3058,6 +3061,7 @@ mod tests {
         )
         .await;
         let candidates = KvTransferCandidates {
+            owner_ranges: Vec::new(),
             block_hashes: vec![
                 ExternalSequenceBlockHash(101),
                 ExternalSequenceBlockHash(102),
@@ -3120,6 +3124,7 @@ mod tests {
         let owner = router_hint_cache_owner();
         let owner_key = ResidencyOwner::cache_owner(owner).compact_key();
         let candidates = KvTransferCandidates {
+            owner_ranges: Vec::new(),
             block_hashes: vec![
                 ExternalSequenceBlockHash(101),
                 ExternalSequenceBlockHash(102),
@@ -3151,6 +3156,74 @@ mod tests {
                 ],
             })
         );
+    }
+
+    #[tokio::test]
+    async fn transfer_hint_suffix_requires_receiver_coverage_and_eligible_owner() {
+        use dynamo_kv_router::kv_hints::KvTransferRange;
+
+        let target = WorkerWithDpRank::new(7, 0);
+        let mut workers = HashMap::new();
+        workers.insert(7, transfer_hint_runtime_config(None));
+        let router = make_test_router_with_workers(
+            InspectingSelector {
+                expected_hits: None,
+                selected_worker: target,
+            },
+            None,
+            workers,
+        )
+        .await;
+        let owner = router_hint_cache_owner();
+        let source =
+            KvTransferCandidateSource::CacheOwner(ResidencyOwner::cache_owner(owner).compact_key());
+        let hashes = vec![
+            ExternalSequenceBlockHash(103),
+            ExternalSequenceBlockHash(104),
+        ];
+        for (attached, worker_type, endpoint, eligible) in [
+            (None, "prefill", "tcp://guard:23280", true),
+            (Some(target), "prefill", "tcp://guard:23280", false),
+            (None, "decode", "tcp://guard:23280", false),
+            (None, "prefill", "", false),
+        ] {
+            let candidates = KvTransferCandidates {
+                block_hashes: vec![
+                    ExternalSequenceBlockHash(101),
+                    ExternalSequenceBlockHash(102),
+                ],
+                owner_prefix_blocks: Vec::new(),
+                owner_ranges: vec![KvTransferRange {
+                    source,
+                    start_block: 2,
+                    parent_hash: ExternalSequenceBlockHash(102),
+                    block_hashes: hashes.clone(),
+                }],
+                routing_snapshot: Some(Arc::new(ResidencyRoutingSnapshot::new(
+                    ResidencyProjection::default(),
+                    [(
+                        owner,
+                        RouterHintSourceMetadata {
+                            source_control_endpoint: endpoint.to_string(),
+                            worker_type: worker_type.to_string(),
+                        },
+                        attached,
+                    )],
+                ))),
+            };
+            for cached_prefix in 0..=4 {
+                let expected = (eligible && (2..4).contains(&cached_prefix)).then(|| {
+                    KvSourceLocationsPayload {
+                        source_control_endpoint: endpoint.to_string(),
+                        block_hashes: hashes.clone(),
+                    }
+                });
+                assert_eq!(
+                    router.transfer_hint_for_selection(target, cached_prefix, Some(&candidates)),
+                    expected
+                );
+            }
+        }
     }
 
     #[tokio::test]

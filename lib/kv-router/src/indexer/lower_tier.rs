@@ -25,7 +25,7 @@ use super::WorkerObservationState;
 use super::{
     EventKind, KvIndexerMetrics, KvRouterError, SyncIndexer, WorkerLookupStats, WorkerTask,
 };
-use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
+use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates, KvTransferRange};
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, OverlapScores, ResetScope, ResidencyDomain,
@@ -48,6 +48,7 @@ type FinalStates = FxHashMap<WorkerWithDpRank, (usize, Option<ExternalSequenceBl
 pub struct KvTransferExtensions {
     pub block_hashes: Vec<(usize, ExternalSequenceBlockHash)>,
     pub owner_prefix_blocks: FxHashMap<KvTransferCandidateSource, usize>,
+    pub owner_ranges: Vec<KvTransferRange>,
 }
 
 impl KvTransferExtensions {
@@ -744,6 +745,69 @@ impl LowerTierIndexer {
         sources
     }
 
+    /// Discover source-owned suffixes at verified receiver continuation points.
+    /// Owners share one edge walk per distinct anchor; an owner stops at its
+    /// first missing edge and is never credited with an earlier prefix.
+    fn suffix_router_hint_ranges(
+        &self,
+        local_hashes: &[LocalBlockHash],
+        anchors: FxHashSet<(usize, ExternalSequenceBlockHash)>,
+        snapshot: &ResidencyRoutingSnapshot,
+    ) -> Vec<KvTransferRange> {
+        let mut ranges = Vec::new();
+        for (start_block, parent_hash) in anchors {
+            if start_block == 0 || start_block >= local_hashes.len() {
+                continue;
+            }
+            let Some(first_edge) = self.edges.get(&TransitionKey {
+                parent_hash: Some(parent_hash),
+                local_hash: local_hashes[start_block],
+            }) else {
+                continue;
+            };
+            let mut active = HintSourceSet::default();
+            first_edge.collect_router_hint_sources(snapshot, &mut active);
+            drop(first_edge);
+            let mut chain = Vec::new();
+            let mut ended = Vec::new();
+            let mut parent = Some(parent_hash);
+            for local_hash in &local_hashes[start_block..] {
+                if active.is_empty() {
+                    break;
+                }
+                let Some(edge) = self.edges.get(&TransitionKey {
+                    parent_hash: parent,
+                    local_hash: *local_hash,
+                }) else {
+                    break;
+                };
+                let mut matched = HintSourceSet::default();
+                edge.collect_matching_router_hint_sources(&active, &mut matched);
+                for owner in active.difference(&matched) {
+                    ended.push((*owner, chain.len()));
+                }
+                active = matched;
+                if active.is_empty() {
+                    break;
+                }
+                let child = edge.child_hash();
+                chain.push(child);
+                parent = Some(child);
+            }
+            ended.extend(active.into_iter().map(|owner| (owner, chain.len())));
+            ranges.extend(ended.into_iter().filter_map(|(owner, count)| {
+                (count > 0).then(|| KvTransferRange {
+                    source: KvTransferCandidateSource::CacheOwner(owner),
+                    start_block,
+                    parent_hash,
+                    block_hashes: chain[..count].to_vec(),
+                })
+            }));
+        }
+        ranges.sort_unstable_by_key(|range| (range.source, range.start_block));
+        ranges
+    }
+
     /// Reconstruct store events from the per-worker block index. Each block
     /// becomes a single-block `Stored` event with the correct parent hash,
     /// suitable for replaying into a fresh indexer to recreate the same state.
@@ -978,6 +1042,23 @@ impl LowerTierIndexer {
                     next.hint_sources.extend(frontier.hint_sources);
                 }
             }
+        }
+
+        if let Some(extensions) = kv_transfer_extensions.as_mut() {
+            // Use final positions, not only device positions: the receiver may
+            // already cover the beginning of the request in native CPU memory.
+            let anchors = continuations
+                .iter()
+                .filter_map(|(worker, initial)| {
+                    let (pos, parent) = final_states
+                        .get(worker)
+                        .copied()
+                        .unwrap_or((initial.start_pos, initial.last_matched_hash));
+                    parent.map(|parent| (pos, parent))
+                })
+                .collect();
+            extensions.owner_ranges =
+                self.suffix_router_hint_ranges(local_hashes, anchors, snapshot);
         }
 
         // Convert final_states into the result. Workers that never appeared in
