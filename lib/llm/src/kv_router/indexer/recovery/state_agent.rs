@@ -570,9 +570,11 @@ async fn run_state_agent_router(
                     tracing::warn!(%owner, %error, "KV state-source recovery completion failed closed");
                 }
                 if runtime.get(&owner).is_some_and(|state| {
-                    state.publisher_id == Some(publisher_id)
-                        && (state.recovery_required
-                            || (retry_fence.activation_expected && !state.ready))
+                    owner_recovery_requires_retry(
+                        state,
+                        publisher_id,
+                        retry_fence.activation_expected,
+                    )
                 }) {
                     recovery_retry.schedule(retry_fence);
                 }
@@ -666,6 +668,17 @@ async fn wait_for_retry_deadline(deadline: Option<Instant>) {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
         None => std::future::pending().await,
     }
+}
+
+fn owner_recovery_requires_retry(
+    state: &OwnerRuntime,
+    publisher_id: u64,
+    activation_expected: bool,
+) -> bool {
+    state.publisher_id == Some(publisher_id)
+        && (state.recovery_required
+            || (activation_expected && !state.ready)
+            || (state.router_hint_source.is_some() && !state.hint_ready))
 }
 
 fn source_retry_fence(
@@ -2082,7 +2095,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detached_owner_remains_hint_source_without_scheduling_projection() {
+    async fn detached_owner_remains_hint_source_and_retries_readiness() {
         let owner = owner(4);
         let owner_key = ResidencyOwner::cache_owner(owner).compact_key();
         let worker = WorkerWithDpRank::new(17, 3);
@@ -2167,6 +2180,7 @@ mod tests {
         state.ready = false;
         state.attached_worker = None;
         state.attachment_generation = None;
+        assert!(!owner_recovery_requires_retry(state, 41, false));
         publish_projection(&indexer, &runtime);
         let detached = lookup();
         let details = &detached[&StorageTier::HostPinned];
@@ -2185,7 +2199,10 @@ mod tests {
             None
         );
 
-        runtime.get_mut(&owner).unwrap().hint_ready = false;
+        let state = runtime.get_mut(&owner).unwrap();
+        state.hint_ready = false;
+        assert!(owner_recovery_requires_retry(state, 41, false));
+
         publish_projection(&indexer, &runtime);
         let cleared = lookup();
         assert!(
