@@ -1735,6 +1735,27 @@ fn normalize_raw_batch(
                 .block_size()
                 .is_some_and(|size| size != kv_block_size as usize)
         {
+            if let dynamo_kv_router::zmq_wire::RawKvEvent::BlockStored {
+                block_size,
+                group_idx,
+                kv_cache_spec_kind,
+                medium,
+                ..
+            } = &raw_event
+            {
+                tracing::warn!(
+                    worker_id = worker.worker_id,
+                    dp_rank = worker.dp_rank,
+                    expected_block_size = kv_block_size,
+                    actual_block_size = *block_size,
+                    ?group_idx,
+                    ?kv_cache_spec_kind,
+                    ?medium,
+                    event_kind = "BlockStored",
+                    "Incompatible KVCR block geometry; withdrawing cache owner"
+                );
+            }
+
             cache_owner_fault.get_or_insert("KVCR block size is incompatible");
             continue;
         }
