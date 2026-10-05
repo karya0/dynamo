@@ -1679,10 +1679,8 @@ fn normalize_raw_batch(
     framework_normalizer: &mut ZmqEventNormalizer,
     cache_owner_normalizer: &mut ZmqEventNormalizer,
 ) -> NormalizedRawBatch {
-    // Index main-attention prefixes, as for framework routing. Known non-main
-    // groups are intentionally filtered, not evidence of a broken owner stream.
-    // This is advisory: vLLM must still verify all required groups before reuse.
-    // Unknown events and incompatible main-attention geometry remain fail-closed.
+    // Index main-attention prefixes; vLLM still verifies all groups before reuse.
+    // Filter known non-main groups; unknown or incompatible owner events fault.
     let mut events = Vec::with_capacity(raw_events.len().min(MAX_INGRESS_EVENTS));
     let mut source_fault = None;
     let mut cache_owner_fault = None;
@@ -1971,44 +1969,32 @@ mod tests {
     fn hybrid_cache_owner_projection_keeps_full_attention() {
         use dynamo_kv_router::zmq_wire::KvCacheSpecKind;
         let worker = WorkerWithDpRank::new(17, 0);
-        for kind in [KvCacheSpecKind::Mamba, KvCacheSpecKind::SlidingWindow] {
-            let mut recurrent = raw_store(Some("CPU"), Some("kvcr"), 100);
-            if let RawKvEvent::BlockStored {
-                group_idx,
-                kv_cache_spec_kind,
-                block_size,
-                token_ids,
-                ..
-            } = &mut recurrent
-            {
-                *group_idx = Some(0);
-                *kv_cache_spec_kind = Some(kind);
-                *block_size = 0;
-                token_ids.clear();
-            }
-            let mut full = raw_store(Some("CPU"), Some("kvcr"), 101);
-            if let RawKvEvent::BlockStored {
-                group_idx,
-                kv_cache_spec_kind,
-                ..
-            } = &mut full
-            {
-                *group_idx = Some(3);
-                *kv_cache_spec_kind = Some(KvCacheSpecKind::FullAttention);
-            }
+        for (medium, kind) in ["CPU", "STORAGE", "DISK"].into_iter().flat_map(|medium| {
+            [KvCacheSpecKind::Mamba, KvCacheSpecKind::SlidingWindow].map(|kind| (medium, kind))
+        }) {
+            let recurrent = serde_json::from_value(serde_json::json!({
+                "type": "BlockStored", "block_hashes": [100], "medium": medium,
+                "token_ids": [], "block_size": 0, "group_idx": 0,
+                "kv_cache_spec_kind": kind, "ownership": "kvcr"
+            }))
+            .unwrap();
+            let full = serde_json::from_value(serde_json::json!({
+                "type": "BlockStored", "block_hashes": [101], "medium": medium,
+                "token_ids": [10, 11, 12, 13], "block_size": 4, "group_idx": 3,
+                "kv_cache_spec_kind": "full_attention", "ownership": "kvcr"
+            }))
+            .unwrap();
             // Decode the producer's named-map removal, including before first store.
             let removed: RawKvEvent = serde_json::from_value(serde_json::json!({
-                "type": "BlockRemoved", "block_hashes": [100], "medium": "CPU",
+                "type": "BlockRemoved", "block_hashes": [100], "medium": medium,
                 "group_idx": 0, "kv_cache_spec_kind": kind, "ownership": "kvcr"
             }))
             .unwrap();
-            let mut learned_removal = removed.clone();
-            if let RawKvEvent::BlockRemoved {
-                kv_cache_spec_kind, ..
-            } = &mut learned_removal
-            {
-                *kv_cache_spec_kind = None;
-            }
+            let learned_removal = serde_json::from_value(serde_json::json!({
+                "type": "BlockRemoved", "block_hashes": [100], "medium": medium,
+                "group_idx": 0, "ownership": "kvcr"
+            }))
+            .unwrap();
             let normalized = normalize_raw_batch(
                 vec![removed, recurrent, full, learned_removal],
                 worker,
@@ -2034,18 +2020,20 @@ mod tests {
             (Some(KvCacheSpecKind::FullAttention), 0, "CPU"),
             (Some(KvCacheSpecKind::Unknown), 4, "CPU"),
             (None, 0, "CPU"),
+            (Some(KvCacheSpecKind::FullAttention), 0, "STORAGE"),
+            (Some(KvCacheSpecKind::Unknown), 4, "STORAGE"),
+            (None, 0, "STORAGE"),
+            (Some(KvCacheSpecKind::FullAttention), 0, "DISK"),
+            (Some(KvCacheSpecKind::Unknown), 4, "DISK"),
+            (None, 0, "DISK"),
             (Some(KvCacheSpecKind::Mamba), 0, "GPU"),
         ] {
-            let mut raw = raw_store(Some(medium), Some("kvcr"), 100);
-            if let RawKvEvent::BlockStored {
-                kv_cache_spec_kind,
-                block_size,
-                ..
-            } = &mut raw
-            {
-                *kv_cache_spec_kind = kind;
-                *block_size = size;
-            }
+            let raw = serde_json::from_value(serde_json::json!({
+                "type": "BlockStored", "block_hashes": [100], "medium": medium,
+                "token_ids": [10, 11, 12, 13], "block_size": size,
+                "kv_cache_spec_kind": kind, "ownership": "kvcr"
+            }))
+            .unwrap();
             let normalized = normalize_raw_batch(
                 vec![raw],
                 WorkerWithDpRank::new(17, 0),
