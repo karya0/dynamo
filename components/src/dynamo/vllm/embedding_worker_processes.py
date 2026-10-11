@@ -29,7 +29,7 @@ import vllm
 from vllm.config import VllmConfig
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.utils import get_engine_zmq_addresses, launch_core_engines
+from vllm.v1.engine.utils import launch_core_engines
 from vllm.v1.executor import Executor
 
 logger = logging.getLogger(__name__)
@@ -413,6 +413,18 @@ def _unpack_core_engine_launch(launch: Any) -> tuple[Any, Any, Any, Any]:
         raise _unrecognized_launch_shape(
             f"a {type(launch).__name__} with no {error.name!r} attribute"
         ) from error
+
+
+def get_engine_zmq_addresses(vllm_config: VllmConfig, process_count: int):
+    # Newer vLLM requires listener ownership transfer, not address templates.
+    try:
+        from vllm.v1.engine.utils import get_engine_zmq_addresses as get_addresses
+    except ImportError as error:
+        raise RuntimeError(
+            "--embedding-worker-processes is not supported with this vLLM "
+            "transport API; use one embedding worker process"
+        ) from error
+    return get_addresses(vllm_config, process_count)
 
 
 def create_shared_embedding_engine_client(

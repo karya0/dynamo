@@ -27,6 +27,24 @@ pytestmark = [
 ]
 
 
+@pytest.mark.parametrize("available", [False, True])
+def test_embedding_addresses_require_legacy_transport(monkeypatch, available):
+    import vllm.v1.engine.utils as engine_utils
+
+    helper = Mock(return_value=object())
+    monkeypatch.delattr(engine_utils, "get_engine_zmq_addresses", raising=False)
+    if available:
+        monkeypatch.setattr(
+            engine_utils, "get_engine_zmq_addresses", helper, raising=False
+        )
+        config = _vllm_config()
+        assert processes.get_engine_zmq_addresses(config, 2) is helper.return_value
+        helper.assert_called_once_with(config, 2)
+    else:
+        with pytest.raises(RuntimeError, match="use one embedding worker process"):
+            processes.get_engine_zmq_addresses(_vllm_config(), 2)
+
+
 def _vllm_config():
     return SimpleNamespace(
         parallel_config=SimpleNamespace(
