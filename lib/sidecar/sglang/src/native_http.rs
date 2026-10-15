@@ -14,7 +14,7 @@ use reqwest::{Response, StatusCode, header};
 use serde_json::{Map, Value};
 use tokio::time::Instant;
 use tokio_util::{
-    codec::{FramedRead, LinesCodec},
+    codec::{FramedRead, LinesCodec, LinesCodecError},
     io::StreamReader,
     sync::CancellationToken,
 };
@@ -22,7 +22,6 @@ use tokio_util::{
 use crate::{client, client::Discovery, protocol};
 
 const PAYLOAD_KEY: &str = "sglang_tito";
-const MAX_EVENT_BYTES: usize = 64 * 1024 * 1024;
 /// `dynamo_llm::protocols::response_merge::PREFILL_OUTPUT_ANNOTATION`.
 const PREFILL_OUTPUT_ANNOTATION: &str = "prefill_output";
 
@@ -141,6 +140,7 @@ pub(crate) fn request(
 pub(crate) struct NativeHttp {
     client: reqwest::Client,
     endpoint: HttpEndpoint,
+    max_event_bytes: usize,
 }
 
 impl NativeHttp {
@@ -148,6 +148,7 @@ impl NativeHttp {
         grpc_endpoint: &GrpcEndpoint,
         discovery: &Discovery,
         connect_timeout: Duration,
+        max_event_bytes: usize,
     ) -> Result<Option<Self>, DynamoError> {
         let Some(raw_port) = discovery.server_info.get("port") else {
             return Ok(None);
@@ -181,7 +182,11 @@ impl NativeHttp {
             .map_err(|error| {
                 client::invalid_arg(format!("could not configure SGLang HTTP client: {error}"))
             })?;
-        Ok(Some(Self { client, endpoint }))
+        Ok(Some(Self {
+            client,
+            endpoint,
+            max_event_bytes,
+        }))
     }
 
     pub(crate) async fn await_ready(
@@ -297,7 +302,10 @@ impl NativeHttp {
 
             let bytes = response.bytes_stream().map_err(io::Error::other);
             let reader = StreamReader::new(bytes);
-            let mut lines = FramedRead::new(reader, LinesCodec::new_with_max_length(MAX_EVENT_BYTES));
+            let mut lines = FramedRead::new(
+                reader,
+                LinesCodec::new_with_max_length(self.max_event_bytes),
+            );
             let mut first_output_seen = false;
             loop {
                 let selected = tokio::select! {
@@ -315,6 +323,13 @@ impl NativeHttp {
                 };
                 let line = match line {
                     Some(Ok(line)) => line,
+                    Some(Err(LinesCodecError::MaxLineLengthExceeded)) => {
+                        yield Err(client::protocol_error(format!(
+                            "SGLang /generate event exceeded {} bytes; raise --native-http-max-event-bytes (DYN_SGLANG_NATIVE_HTTP_MAX_EVENT_BYTES)",
+                            self.max_event_bytes
+                        )));
+                        return;
+                    }
                     Some(Err(error)) => {
                         yield Err(client::protocol_error(format!(
                             "invalid SGLang /generate stream: {error}"
@@ -478,6 +493,8 @@ mod tests {
     };
     use crate::client::Discovery;
 
+    const MAX_EVENT_BYTES: usize = crate::args::DEFAULT_NATIVE_HTTP_MAX_EVENT_BYTES.get();
+
     fn canonical_request() -> PreprocessedRequest {
         PreprocessedRequest::builder()
             .model("model".to_string())
@@ -505,6 +522,7 @@ mod tests {
         NativeHttp {
             client: reqwest::Client::new(),
             endpoint: HttpEndpoint::from_grpc(&grpc, port).unwrap(),
+            max_event_bytes: MAX_EVENT_BYTES,
         }
     }
 
@@ -816,15 +834,21 @@ mod tests {
     fn native_http_discovery_checks_port_and_preserves_endpoint_host() {
         let grpc = GrpcEndpoint::parse("http://engine.example:30001", "test").unwrap();
         assert!(
-            NativeHttp::discover(&grpc, &discovery(json!({})), Duration::from_secs(1))
-                .unwrap()
-                .is_none()
+            NativeHttp::discover(
+                &grpc,
+                &discovery(json!({})),
+                Duration::from_secs(1),
+                MAX_EVENT_BYTES,
+            )
+            .unwrap()
+            .is_none()
         );
         for port in [json!(0), json!(65536), json!(-1), json!("bad"), json!(null)] {
             let error = NativeHttp::discover(
                 &grpc,
                 &discovery(json!({"port": port, "incremental_streaming_output": true})),
                 Duration::from_secs(1),
+                MAX_EVENT_BYTES,
             )
             .err()
             .unwrap();
@@ -837,6 +861,7 @@ mod tests {
             &grpc,
             &discovery(json!({"port": "30000", "incremental_streaming_output": true})),
             Duration::from_secs(1),
+            MAX_EVENT_BYTES,
         )
         .unwrap()
         .unwrap();
@@ -854,6 +879,7 @@ mod tests {
                 &grpc,
                 &discovery(json!({"port": 30000})),
                 Duration::from_secs(1),
+                MAX_EVENT_BYTES,
             )
             .unwrap()
             .is_none()
@@ -866,6 +892,7 @@ mod tests {
                     "incremental_streaming_output": true
                 })),
                 Duration::from_secs(1),
+                MAX_EVENT_BYTES,
             )
             .unwrap()
             .is_some()
@@ -914,6 +941,35 @@ mod tests {
         assert!(stream.next().await.unwrap().is_ok());
         assert!(*first_token_seen.borrow());
         assert!(stream.next().await.unwrap().is_ok());
+        assert!(stream.next().await.is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_stream_rejects_events_over_configured_limit() {
+        let body = "data: {\"output_ids\":[101],\"meta_info\":{\"finish_reason\":null}}\n\n";
+        let (port, server) = serve_once(body.to_string(), "200 OK").await;
+        let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
+        let native = NativeHttp {
+            max_event_bytes: 16,
+            ..native_http(port)
+        };
+        let mut stream = native.generate(
+            NativeRequest {
+                body: json!({"input_ids": [1], "stream": true}),
+                is_prefill: false,
+                prefill_handoff: None,
+                keep_prefill_output: false,
+            },
+            ctx,
+            CancellationToken::new(),
+        );
+
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(
+            error.to_string().contains("--native-http-max-event-bytes"),
+            "unexpected error: {error}"
+        );
         assert!(stream.next().await.is_none());
         server.await.unwrap();
     }
