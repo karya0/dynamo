@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import ipaddress
 import json
-import socket
 from collections.abc import Mapping
 from typing import Any
 
@@ -32,10 +31,6 @@ def kv_hint_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(hint, Mapping):
         return {}
     return filter_supported_async_generate_kwargs(engine, {"kv_hints": dict(hint)})
-
-
-# SGLang's own control-plane defaults for each KVCR mode.
-_KVCR_DEFAULT_CONTROL_PORT = {"hicache": 32100, "linker": 19500}
 
 
 def kvcr_mode(server_args: Any) -> str | None:
@@ -68,24 +63,30 @@ def kvcr_hint_endpoints(
     mode: str = "hicache",
 ) -> dict[str, str]:
     """One base endpoint per DP replica, matching SGLang's rank-port layout."""
-    # The linker names the option advertise_host and, when unset, advertises
-    # the address of this host's name; the in-process engine shares the host.
-    host = extra_config.get("control_advertise_host")
-    if host is None:
+    if mode not in ("hicache", "linker"):
+        raise ValueError(f"Unknown KVCR mode: {mode}")
+    # HiCache does not consume advertise_host: accepting it here would publish
+    # an address different from the storage backend's actual bound endpoint.
+    host = extra_config.get("control_advertise_host", "127.0.0.1")
+    port = extra_config.get("control_port", 32100)
+    if mode == "linker":
+        # Linker revisions have different defaults (19500 vs OS-assigned 0)
+        # and option names. Require explicit coordinates rather than guess.
         host = extra_config.get("advertise_host")
-    if host is None:
-        host = (
-            socket.gethostbyname(socket.gethostname())
-            if mode == "linker"
-            else "127.0.0.1"
-        )
-    port = extra_config.get("control_port", _KVCR_DEFAULT_CONTROL_PORT[mode])
+        alternate = extra_config.get("control_advertise_host")
+        if host is not None and alternate is not None and host != alternate:
+            raise ValueError("Conflicting KVCR linker advertise hosts")
+        if host is None:
+            host = alternate
+        port = extra_config.get("control_port")
     if not isinstance(host, str) or not host:
         raise ValueError("KVCR requires an advertisable control host")
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
         address = None
+        if any(char.isspace() or char in "/@?#:[]" for char in host):
+            raise ValueError("KVCR requires a host, not a URL or malformed address")
     if address is not None:
         if address.is_unspecified:
             raise ValueError("KVCR cannot advertise an unspecified control host")
@@ -127,8 +128,26 @@ def publish_kvcr_hint_capabilities(
         extra = {}
     if not isinstance(extra, Mapping):
         raise ValueError("KVCR HiCache extra configuration must be an object")
-    # The linker has no such option and rejects unknown keys; it is enabled.
-    if mode == "hicache" and extra.get("enable_remote_hint", True) is not True:
+    # Legacy linker revisions have no switch; newer ones can disable hints.
+    if extra.get("enable_remote_hint", True) is not True:
+        return
+    if (
+        mode == "linker"
+        and extra.get("advertise_host") is None
+        and extra.get("enable_remote_hint", False) is not True
+    ):
+        # The newer control_advertise_host dialect defaults remote hints off.
+        # The legacy advertise_host runtime has no switch and enables peers.
+        return
+    if mode == "linker" and (
+        "control_port" not in extra
+        or (
+            extra.get("advertise_host") is None
+            and extra.get("control_advertise_host") is None
+        )
+    ):
+        # Local-only/default linkers can still serve, but cannot advertise a
+        # guessed source-control endpoint to another worker.
         return
     # WorkerType is a PyO3 enum, not enum.Enum: its wire role is __str__,
     # and accessing .value aborts registration after the model has loaded.
