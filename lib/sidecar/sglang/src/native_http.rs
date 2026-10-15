@@ -7,10 +7,12 @@ use std::{collections::HashMap, io, time::Duration};
 
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GenerateContext, LLMEngineOutput, PreprocessedRequest,
+    PromptTokensDetails, usage,
 };
 use dynamo_sidecar_common::{GrpcEndpoint, HttpEndpoint};
 use futures::{StreamExt, TryStreamExt, stream::BoxStream};
 use reqwest::{Response, StatusCode, header};
+use serde::Deserialize;
 use serde_json::{Map, Value};
 use tokio::time::Instant;
 use tokio_util::{
@@ -381,7 +383,22 @@ impl NativeHttp {
                     return;
                 }
                 let has_output = response_has_output(&response);
-                let (mut output, terminal) = output(response, &mut prefill_handoff);
+                // The router counts decode output from token_ids; clients get the
+                // opaque response. Prefill reports none, as on the gRPC path.
+                let token_ids = if is_prefill {
+                    Vec::new()
+                } else {
+                    match output_ids(&response) {
+                        Ok(token_ids) => token_ids,
+                        Err(error) => {
+                            yield Err(error);
+                            return;
+                        }
+                    }
+                };
+                let (mut output, terminal) =
+                    output(response, is_prefill, &mut prefill_handoff);
+                output.token_ids = token_ids;
                 if !first_output_seen && has_output && (!is_prefill || terminal) {
                     ctx.notify_first_token();
                     first_output_seen = true;
@@ -403,6 +420,13 @@ impl NativeHttp {
     }
 }
 
+fn output_ids(response: &Value) -> Result<Vec<u32>, DynamoError> {
+    response.get("output_ids").map_or(Ok(Vec::new()), |ids| {
+        Vec::<u32>::deserialize(ids)
+            .map_err(|error| client::protocol_error(format!("invalid SGLang output_ids: {error}")))
+    })
+}
+
 fn response_has_output(response: &Value) -> bool {
     [response.get("output_ids"), response.get("text")]
         .into_iter()
@@ -414,28 +438,75 @@ fn response_has_output(response: &Value) -> bool {
         })
 }
 
-fn output(response: Value, prefill_handoff: &mut Option<Value>) -> (LLMEngineOutput, bool) {
+/// Prefill's terminal carries no typed finish details.
+fn output(
+    response: Value,
+    is_prefill: bool,
+    prefill_handoff: &mut Option<Value>,
+) -> (LLMEngineOutput, bool) {
     let error = response.get("error");
-    let finished = error.is_some()
-        || response
-            .pointer("/meta_info/finish_reason")
-            .is_some_and(|reason| !reason.is_null());
-    let mut output = match error {
-        Some(error) => LLMEngineOutput::error(
+    let finish = response
+        .pointer("/meta_info/finish_reason")
+        .filter(|reason| !reason.is_null());
+    let finished = error.is_some() || finish.is_some();
+    let mut output = match (error, finish) {
+        (Some(error), _) => LLMEngineOutput::error(
             error
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("SGLang generation failed")
                 .to_string(),
         ),
-        None if finished => LLMEngineOutput::stop(),
-        None => LLMEngineOutput::default(),
+        (None, Some(_)) if is_prefill => LLMEngineOutput::stop(),
+        (None, Some(finish)) => decode_terminal(&response["meta_info"], finish),
+        (None, None) => LLMEngineOutput::default(),
     };
     output.engine_data = Some(serde_json::json!({"sglang_response": response}));
     if finished {
         output.disaggregated_params = prefill_handoff.take();
     }
     (output, finished)
+}
+
+fn decode_terminal(meta: &Value, finish: &Value) -> LLMEngineOutput {
+    let mut output = match finish.get("type").and_then(Value::as_str) {
+        Some("length") => LLMEngineOutput::length(),
+        // SGLang also aborts ordinary cancellations, without error metadata.
+        Some("abort")
+            if ["status_code", "err_type"]
+                .iter()
+                .any(|key| finish.get(key).is_some_and(|value| !value.is_null())) =>
+        {
+            LLMEngineOutput::error(
+                finish
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .filter(|message| !message.is_empty())
+                    .unwrap_or("SGLang aborted the request with an error")
+                    .to_string(),
+            )
+        }
+        Some("abort") => LLMEngineOutput::cancelled(),
+        _ => LLMEngineOutput::stop(),
+    };
+    let count = |key| {
+        meta.get(key)
+            .and_then(Value::as_u64)
+            .and_then(|count| u32::try_from(count).ok())
+    };
+    if let (Some(prompt_tokens), Some(completion_tokens)) =
+        (count("prompt_tokens"), count("completion_tokens"))
+    {
+        let mut completion_usage = usage(prompt_tokens, completion_tokens);
+        completion_usage.prompt_tokens_details = count("cached_tokens")
+            .filter(|&cached_tokens| cached_tokens > 0)
+            .map(|cached_tokens| PromptTokensDetails {
+                cached_tokens: Some(cached_tokens),
+                ..Default::default()
+            });
+        output.completion_usage = Some(completion_usage);
+    }
+    output
 }
 
 fn request_error(error: reqwest::Error) -> DynamoError {
@@ -798,7 +869,7 @@ mod tests {
     #[test]
     fn native_output_preserves_the_envelope_and_marks_terminals() {
         let chunk = json!({"output_ids": [10], "meta_info": {"finish_reason": null}});
-        let (converted, is_terminal) = output(chunk.clone(), &mut None);
+        let (converted, is_terminal) = output(chunk.clone(), false, &mut None);
         assert!(!is_terminal);
         assert_eq!(
             converted.engine_data,
@@ -808,17 +879,17 @@ mod tests {
         assert!(converted.disaggregated_params.is_none());
 
         let terminal = json!({"meta_info": {"finish_reason": {"type": "length"}}});
-        let (converted, is_terminal) = output(terminal.clone(), &mut None);
+        let (converted, is_terminal) = output(terminal.clone(), false, &mut None);
         assert!(is_terminal);
         assert_eq!(
             converted.engine_data,
             Some(json!({"sglang_response": terminal}))
         );
-        assert_eq!(converted.finish_reason, Some(FinishReason::Stop));
+        assert_eq!(converted.finish_reason, Some(FinishReason::Length));
         assert!(converted.disaggregated_params.is_none());
 
         let failure = json!({"error": {"message": "rejected"}});
-        let (converted, is_terminal) = output(failure.clone(), &mut None);
+        let (converted, is_terminal) = output(failure.clone(), false, &mut None);
         assert!(is_terminal);
         assert_eq!(
             converted.finish_reason,
@@ -828,6 +899,58 @@ mod tests {
             converted.engine_data,
             Some(json!({"sglang_response": failure}))
         );
+    }
+
+    #[test]
+    fn native_decode_terminal_reports_typed_finish_and_usage() {
+        for (finish, expected) in [
+            (json!({"type": "stop", "matched": 2}), FinishReason::Stop),
+            (json!({"type": "length"}), FinishReason::Length),
+            (json!({"type": "unknown"}), FinishReason::Stop),
+            (
+                json!({"type": "abort", "message": "x"}),
+                FinishReason::Cancelled,
+            ),
+            (
+                json!({"type": "abort", "message": "bad", "status_code": 400}),
+                FinishReason::Error("bad".into()),
+            ),
+            (
+                json!({"type": "abort", "message": "", "err_type": "E"}),
+                FinishReason::Error("SGLang aborted the request with an error".into()),
+            ),
+        ] {
+            let response = json!({"meta_info": {
+                "finish_reason": finish, "prompt_tokens": 4, "completion_tokens": 3,
+                "cached_tokens": 2,
+            }});
+            let (converted, is_terminal) = output(response, false, &mut None);
+            assert!(is_terminal, "{finish}");
+            assert_eq!(converted.finish_reason, Some(expected), "{finish}");
+            assert!(converted.stop_reason.is_none(), "{finish}");
+            let usage = converted.completion_usage.unwrap();
+            assert_eq!((usage.prompt_tokens, usage.completion_tokens), (4, 3));
+            assert_eq!(usage.prompt_tokens_details.unwrap().cached_tokens, Some(2));
+        }
+
+        let response = json!({"meta_info": {
+            "finish_reason": {"type": "stop"}, "prompt_tokens": 4, "cached_tokens": 0,
+        }});
+        assert!(
+            output(response, false, &mut None)
+                .0
+                .completion_usage
+                .is_none()
+        );
+
+        // Prefill terminals keep the untyped stop.
+        let response = json!({"meta_info": {
+            "finish_reason": {"type": "length"}, "prompt_tokens": 4, "completion_tokens": 1,
+        }});
+        let (converted, is_terminal) = output(response, true, &mut None);
+        assert!(is_terminal);
+        assert_eq!(converted.finish_reason, Some(FinishReason::Stop));
+        assert!(converted.completion_usage.is_none());
     }
 
     #[test]
@@ -918,7 +1041,8 @@ mod tests {
             "event: message\n",
             "data:{\"output_ids\":[101],\"meta_info\":{\"finish_reason\":null}}\n\n",
             "retry: 1000\n",
-            "data: {\"output_ids\":[102],\"meta_info\":{\"finish_reason\":{\"type\":\"stop\"}}}\n\n"
+            "data: {\"output_ids\":[102],\"meta_info\":{\"finish_reason\":{\"type\":\"stop\",\"matched\":102},",
+            "\"prompt_tokens\":1,\"completion_tokens\":2}}\n\n"
         )
         .to_string();
         let (port, server) = serve_once(body, "200 OK").await;
@@ -938,9 +1062,38 @@ mod tests {
             CancellationToken::new(),
         );
 
-        assert!(stream.next().await.unwrap().is_ok());
+        assert_eq!(stream.next().await.unwrap().unwrap().token_ids, [101]);
         assert!(*first_token_seen.borrow());
-        assert!(stream.next().await.unwrap().is_ok());
+        let terminal = stream.next().await.unwrap().unwrap();
+        assert_eq!(terminal.token_ids, [102]);
+        assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
+        assert!(terminal.stop_reason.is_none());
+        assert_eq!(terminal.completion_usage.unwrap().total_tokens, 3);
+        assert!(stream.next().await.is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_stream_rejects_invalid_output_ids() {
+        let body = "data: {\"output_ids\":[-1],\"meta_info\":{\"finish_reason\":null}}\n\n";
+        let (port, server) = serve_once(body.to_string(), "200 OK").await;
+        let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
+        let mut stream = native_http(port).generate(
+            NativeRequest {
+                body: json!({"input_ids": [1], "stream": true}),
+                is_prefill: false,
+                prefill_handoff: None,
+                keep_prefill_output: false,
+            },
+            ctx,
+            CancellationToken::new(),
+        );
+
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(
+            error.to_string().contains("invalid SGLang output_ids"),
+            "{error}"
+        );
         assert!(stream.next().await.is_none());
         server.await.unwrap();
     }
@@ -1060,6 +1213,8 @@ mod tests {
             terminal.engine_data,
             Some(json!({"sglang_response": response}))
         );
+        assert!(terminal.token_ids.is_empty());
+        assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
         server.await.unwrap();
     }
 
@@ -1131,6 +1286,7 @@ mod tests {
         assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
         assert!(terminal.disaggregated_params.is_none());
         assert!(terminal.engine_data.is_none());
+        assert!(terminal.token_ids.is_empty());
         assert!(stream.next().await.is_none());
         server.await.unwrap();
     }
