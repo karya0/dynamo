@@ -71,14 +71,28 @@ def _cached_tokens_from_usage(usage: dict[str, Any] | None) -> int | None:
 
 
 def _request_logprobs_count(request: dict[str, Any]) -> int | None:
+    """Map OpenAI chat logprob fields onto ``output_options.logprobs``.
+
+    The result is the number of alternatives per token. ``logprobs: true``
+    without ``top_logprobs`` is ``0``: the sampled token only. A positive
+    ``top_logprobs`` requires ``logprobs: true``, as in OpenAI.
+    """
     logprobs = request.get("logprobs")
     top_logprobs = request.get("top_logprobs")
+    if top_logprobs is not None and (
+        not isinstance(top_logprobs, int)
+        or isinstance(top_logprobs, bool)
+        or top_logprobs < 0
+    ):
+        raise PreprocessError("`top_logprobs` must be an integer >= 0.")
+    if top_logprobs and logprobs is not True:
+        raise PreprocessError(
+            "When using `top_logprobs`, `logprobs` must be set to true."
+        )
     if logprobs is True:
-        return top_logprobs if top_logprobs is not None else 1
+        return top_logprobs if top_logprobs is not None else 0
     if isinstance(logprobs, int) and not isinstance(logprobs, bool):
         return logprobs
-    if top_logprobs not in (None, 0):
-        return top_logprobs
     return None
 
 
