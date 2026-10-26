@@ -20,6 +20,9 @@ pytestmark = [
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MANIFEST_DIR = _REPO_ROOT / "examples/backends/vllm/deploy/kvcr"
 _MANIFESTS = ("agg.yaml", "agg-memory-service.yaml")
+_GUARD_DAEMONSET_WORKER = "agg-guard-daemonset.yaml"
+_STATE_AGENT = "agg-state-agent.yaml"
+_MODEL_NAMESPACE = "kvcr-qwen3-0-6b"
 
 
 def _worker(manifest_name: str) -> dict:
@@ -291,3 +294,78 @@ def test_deploy_script_rejects_unsafe_compatibility_digest() -> None:
     assert result.returncode == 2
     assert result.stdout == ""
     assert "unsupported character" in result.stderr
+
+
+def _manifest_text(name: str) -> str:
+    return (_MANIFEST_DIR / name).read_text()
+
+
+def test_guard_daemonset_variant_uses_external_state_agent() -> None:
+    manifest = yaml.safe_load((_MANIFEST_DIR / _GUARD_DAEMONSET_WORKER).read_text())
+    pod_spec = _worker(_GUARD_DAEMONSET_WORKER)["podTemplate"]["spec"]
+    main = pod_spec["containers"][0]
+    command = main["args"][0]
+
+    assert (
+        manifest["metadata"]["annotations"]["nvidia.com/dynamo-discovery-backend"]
+        == "kubernetes"
+    )
+    # No sidecar and no in-pod state agent or Guard.
+    assert [container["name"] for container in pod_spec["containers"]] == ["main"]
+    assert "dynamo.kv_state_agent" not in _manifest_text(_GUARD_DAEMONSET_WORKER)
+    assert "kvcr.kvcr_service" not in _manifest_text(_GUARD_DAEMONSET_WORKER)
+    assert f"--kv-state-endpoint {_MODEL_NAMESPACE}/backend/generate" in command
+
+    # The worker waits for the Guard socket instead of crash-looping.
+    (wait,) = pod_spec["initContainers"]
+    assert wait["name"] == "wait-for-guard"
+    assert "/run/kvcr/qwen3-0.6b/memory.sock" in wait["args"][0]
+    assert "/run/kvcr/qwen3-0.6b/memory.sock" in command
+
+    for volume in pod_spec["volumes"]:
+        assert "hostPath" in volume
+    assert "hostPID" not in pod_spec
+    assert "hostNetwork" not in pod_spec
+
+
+def test_state_agent_deployment_is_singleton_in_the_model_namespace() -> None:
+    documents = list(yaml.safe_load_all(_manifest_text(_STATE_AGENT)))
+    deployment = next(doc for doc in documents if doc["kind"] == "Deployment")
+    spec = deployment["spec"]
+    pod_spec = spec["template"]["spec"]
+    (container,) = pod_spec["containers"]
+    env = {item["name"]: item for item in container["env"]}
+
+    assert spec["replicas"] == 1
+    assert spec["strategy"]["type"] == "Recreate"
+    assert env["DYN_NAMESPACE"]["value"] == _MODEL_NAMESPACE
+    assert env["DYN_DISCOVERY_BACKEND"]["value"] == "kubernetes"
+    assert container["command"] + container["args"][:2] == [
+        "python3",
+        "-m",
+        "dynamo.kv_state_agent",
+    ]
+    assert "--max-slots" in container["args"]
+    for name, field in (
+        ("POD_NAME", "metadata.name"),
+        ("POD_NAMESPACE", "metadata.namespace"),
+        ("POD_UID", "metadata.uid"),
+    ):
+        assert env[name]["valueFrom"]["fieldRef"]["fieldPath"] == field
+    labels = spec["template"]["metadata"]["labels"]
+    assert labels["nvidia.com/dynamo-discovery-backend"] == "kubernetes"
+    assert labels["nvidia.com/dynamo-discovery-enabled"] == "true"
+    assert not pod_spec.get("hostPID") and not pod_spec.get("hostNetwork")
+
+    role = next(doc for doc in documents if doc["kind"] == "Role")
+    assert any("dynamoworkermetadatas" in rule["resources"] for rule in role["rules"])
+    assert pod_spec["serviceAccountName"] == next(
+        doc["metadata"]["name"] for doc in documents if doc["kind"] == "ServiceAccount"
+    )
+    # Workers target the same namespace the agent registers in.
+    command = _worker(_GUARD_DAEMONSET_WORKER)["podTemplate"]["spec"]["containers"][0][
+        "args"
+    ][0]
+    assert f"--kv-state-endpoint {env['DYN_NAMESPACE']['value']}/backend/generate" in (
+        command
+    )
