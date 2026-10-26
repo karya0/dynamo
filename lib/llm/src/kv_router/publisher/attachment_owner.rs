@@ -74,9 +74,9 @@ impl KvStateAttachmentOwner {
         worker_id: WorkerId,
         descriptors: Vec<KvStateAttachmentDescriptor>,
     ) -> Result<Arc<Self>> {
-        validate_descriptors(&descriptors)?;
         let component = endpoint.component().clone();
-        let host = discover_single_host(&component).await?;
+        let host_namespace = host_namespace(&descriptors)?;
+        let host = discover_single_host(&component, &host_namespace).await?;
         let producer_instance = producer_instance(&endpoint).await?;
 
         let intents = materialize_intents(&host, &producer_instance, worker_id, descriptors)?;
@@ -182,20 +182,34 @@ fn validate_descriptors(descriptors: &[KvStateAttachmentDescriptor]) -> Result<(
         if descriptor.raw_zmq_endpoint.is_empty() {
             anyhow::bail!("state-agent descriptor has an empty raw endpoint");
         }
+        if descriptor.kv_state_endpoint != descriptors[0].kv_state_endpoint {
+            anyhow::bail!(
+                "state-agent descriptors disagree on kv_state_endpoint ({} vs {})",
+                descriptors[0].kv_state_endpoint,
+                descriptor.kv_state_endpoint
+            );
+        }
     }
     Ok(())
 }
 
-/// Resolve the single live V2 state-agent host for this component's namespace.
+/// The namespace that hosts the state agent: the one the descriptors' shared
+/// `kv_state_endpoint` names, which is the worker's own namespace by default.
+fn host_namespace(descriptors: &[KvStateAttachmentDescriptor]) -> Result<String> {
+    validate_descriptors(descriptors)?;
+    Ok(descriptors[0].kv_state_endpoint.namespace.clone())
+}
+
+/// Resolve the single live V2 state-agent host in `namespace`.
 async fn discover_single_host(
     component: &dynamo_runtime::component::Component,
+    namespace: &str,
 ) -> Result<KvStateHostAdvertisement> {
-    let namespace = component.namespace().name();
     let discovery = component.drt().discovery();
     let shutdown = component.drt().primary_token();
     await_single_host(
         discovery.as_ref(),
-        &namespace,
+        namespace,
         host_discovery_timeout(|key| std::env::var_os(key)),
         &shutdown,
     )
@@ -725,10 +739,19 @@ mod tests {
         publisher_id: u64,
         advertisement: &KvStateHostAdvertisement,
     ) {
+        register_host_in(discovery, "ns", publisher_id, advertisement).await;
+    }
+
+    async fn register_host_in(
+        discovery: &dyn Discovery,
+        namespace: &str,
+        publisher_id: u64,
+        advertisement: &KvStateHostAdvertisement,
+    ) {
         discovery
             .register(DiscoverySpec::EventSource {
                 scope: EventScope::Component {
-                    namespace: "ns".to_string(),
+                    namespace: namespace.to_string(),
                     component: HOST_COMPONENT.to_string(),
                 },
                 topic: KV_STATE_HOST_TOPIC_V2.to_string(),
@@ -887,6 +910,134 @@ mod tests {
         .await
         .unwrap_err();
         assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(format!("{error:#}").contains("exactly one live V2 host, found 2"));
+    }
+
+    fn host_in(namespace: &str) -> KvStateHostAdvertisement {
+        let mut instance = instance("kv_state_agent", 1);
+        instance.namespace = namespace.to_string();
+        KvStateHostAdvertisement {
+            protocol_version: KvStateProtocolVersion::V2,
+            host_instance: instance.clone(),
+            control_target: instance,
+            max_slots: 8,
+        }
+    }
+
+    fn descriptors_for(endpoint: &str) -> Vec<KvStateAttachmentDescriptor> {
+        let mut descriptors = descriptors();
+        for descriptor in &mut descriptors {
+            descriptor.kv_state_endpoint = EndpointId::from(endpoint);
+        }
+        descriptors
+    }
+
+    /// Resolve the host namespace from the descriptors, discover the host there, and
+    /// register the intents, as `start` does (minus the runtime `Component`).
+    async fn attach(
+        discovery: &Arc<dyn Discovery>,
+        descriptors: Vec<KvStateAttachmentDescriptor>,
+    ) -> Result<KvStateHostAdvertisement> {
+        let namespace = host_namespace(&descriptors)?;
+        let host = await_single_host(
+            discovery.as_ref(),
+            &namespace,
+            Duration::ZERO,
+            &CancellationToken::new(),
+        )
+        .await?;
+        let mut intents = materialize_intents(&host, &instance("producer", 11), 17, descriptors)?
+            .into_values()
+            .collect::<Vec<_>>();
+        register_all(
+            discovery.clone(),
+            &host,
+            &mut intents,
+            Arc::new(Mutex::new(Vec::new())),
+            CancellationToken::new(),
+        )
+        .await?;
+        Ok(host)
+    }
+
+    fn intents_in(namespace: &str) -> DiscoveryQuery {
+        DiscoveryQuery::EventSources(EventSourceQuery::topic(
+            namespace,
+            HOST_COMPONENT,
+            KV_STATE_ATTACHMENT_INTENT_TOPIC_V2,
+        ))
+    }
+
+    /// Host in `shared`, worker in `dgd-a`: the endpoint's namespace selects the host.
+    #[tokio::test]
+    async fn host_in_another_namespace_is_discovered_and_attached() {
+        let discovery = mock_discovery();
+        register_host_in(discovery.as_ref(), "shared", 41, &host_in("shared")).await;
+        // A host in the worker's own namespace must not be consulted.
+        register_host_in(discovery.as_ref(), "dgd-a", 42, &host_in("dgd-a")).await;
+        let host = attach(&discovery, descriptors_for("shared/backend/generate"))
+            .await
+            .unwrap();
+        assert_eq!(host.host_instance.namespace, "shared");
+        assert_eq!(discovery.list(intents_in("shared")).await.unwrap().len(), 2);
+        assert!(
+            discovery
+                .list(intents_in("dgd-a"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn default_same_namespace_endpoint_still_attaches() {
+        let discovery = mock_discovery();
+        register_host(discovery.as_ref(), 41, &host()).await;
+        attach(&discovery, descriptors()).await.unwrap();
+        assert_eq!(discovery.list(intent_query()).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn descriptors_with_different_endpoints_are_refused() {
+        let discovery = mock_discovery();
+        register_host_in(discovery.as_ref(), "shared", 41, &host_in("shared")).await;
+        let mut descriptors = descriptors_for("shared/backend/generate");
+        descriptors[1].kv_state_endpoint = EndpointId::from("other/backend/generate");
+        let error = attach(&discovery, descriptors).await.unwrap_err();
+        assert!(
+            format!("{error:#}").contains("disagree on kv_state_endpoint"),
+            "{error:#}"
+        );
+        assert!(
+            discovery
+                .list(intents_in("shared"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_hosts_in_the_endpoint_namespace_fail_even_if_the_worker_namespace_has_one() {
+        let discovery = mock_discovery();
+        register_host_in(discovery.as_ref(), "dgd-a", 41, &host_in("dgd-a")).await;
+        let error = attach(&discovery, descriptors_for("shared/backend/generate"))
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("exactly one live V2 host, found 0"));
+    }
+
+    #[tokio::test]
+    async fn two_hosts_in_the_endpoint_namespace_fail_closed() {
+        let discovery = mock_discovery();
+        register_host_in(discovery.as_ref(), "shared", 41, &host_in("shared")).await;
+        let mut second = host_in("shared");
+        second.host_instance.instance_id = 2;
+        second.control_target = second.host_instance.clone();
+        register_host_in(discovery.as_ref(), "shared", 42, &second).await;
+        let error = attach(&discovery, descriptors_for("shared/backend/generate"))
+            .await
+            .unwrap_err();
         assert!(format!("{error:#}").contains("exactly one live V2 host, found 2"));
     }
 }
