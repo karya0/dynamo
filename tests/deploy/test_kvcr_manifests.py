@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import json
 import os
 import shutil
@@ -300,6 +301,64 @@ def _manifest_text(name: str) -> str:
     return (_MANIFEST_DIR / name).read_text()
 
 
+def _expected_slot(node_name: str, guard_index: int) -> str:
+    digest = hashlib.sha256(
+        "\0".join(["kvcr-guard-slot/v1", node_name, str(guard_index)]).encode()
+    ).digest()
+    return digest[:16].hex()
+
+
+def _guard_owner(node_name: str, guard_index: str = "0", count: str = "1", **extra):
+    main = _worker(_GUARD_DAEMONSET_WORKER)["podTemplate"]["spec"]["containers"][0]
+    script = _kv_transfer_config_python(main["args"][0])
+    env = {
+        **os.environ,
+        "KVCR_NODE_NAME": node_name,
+        "KVCR_GUARD_INDEX": guard_index,
+        "KVCR_GUARD_COUNT": count,
+        "POD_IP": "192.0.2.1",
+        **extra,
+    }
+    return subprocess.run(
+        ["python3", "-c", script],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+        timeout=30,
+    )
+
+
+def test_guard_daemonset_slot_is_derived_from_node_and_guard_index() -> None:
+    def owner(**kwargs) -> str:
+        result = _guard_owner(**kwargs)
+        assert result.returncode == 0, result.stderr
+        config = json.loads(result.stdout)
+        return config["kv_connector_extra_config"]["dynamo_state_agent"][
+            "cache_owner_ids"
+        ]["0"]
+
+    node_a = owner(node_name="node-a")
+    slot = node_a.rsplit("/", 1)[1]
+    assert len(slot) == 32
+    assert slot == _expected_slot("node-a", 0)
+    # Node-stable: pod identity and pod index must not influence the slot.
+    assert owner(node_name="node-a", POD_INDEX="1", POD_NAME="other") == node_a
+    assert owner(node_name="node-b") != node_a
+    assert owner(node_name="node-a", guard_index="1", count="2").rsplit("/", 1)[
+        1
+    ] == _expected_slot("node-a", 1)
+
+    for kwargs, message in (
+        ({"node_name": ""}, "node name must not be empty"),
+        ({"node_name": "n", "guard_index": "x"}, "must be decimal integers"),
+        ({"node_name": "n", "guard_index": "1", "count": "1"}, "outside [0, 1)"),
+    ):
+        result = _guard_owner(**kwargs)
+        assert result.returncode != 0
+        assert message in result.stderr
+
+
 def test_guard_daemonset_variant_uses_external_state_agent() -> None:
     manifest = yaml.safe_load((_MANIFEST_DIR / _GUARD_DAEMONSET_WORKER).read_text())
     pod_spec = _worker(_GUARD_DAEMONSET_WORKER)["podTemplate"]["spec"]
@@ -322,6 +381,15 @@ def test_guard_daemonset_variant_uses_external_state_agent() -> None:
     assert "/run/kvcr/qwen3-0.6b/memory.sock" in wait["args"][0]
     assert "/run/kvcr/qwen3-0.6b/memory.sock" in command
 
+    # The owner slot comes from the node, not the pod index.
+    env = {item["name"]: item for item in main["env"]}
+    assert env["KVCR_NODE_NAME"]["valueFrom"]["fieldRef"]["fieldPath"] == (
+        "spec.nodeName"
+    )
+    assert "KVCR_CACHE_SLOT" not in env
+    assert "POD_INDEX" not in env
+    assert "podclique-pod-index" not in _manifest_text(_GUARD_DAEMONSET_WORKER)
+    assert "kvcr-guard-slot/v1" in command
     for volume in pod_spec["volumes"]:
         assert "hostPath" in volume
     assert "hostPID" not in pod_spec

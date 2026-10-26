@@ -50,24 +50,35 @@ spec:
 
             kv_transfer_config=$(
               python3 - <<'PY'
+            import hashlib
             import json
             import os
 
             def cache_owner_id():
-                raw_slot = os.environ["KVCR_CACHE_SLOT"]
-                raw_count = os.environ["KVCR_CACHE_SLOT_COUNT"]
-                if not raw_slot.isdecimal() or not raw_count.isdecimal():
-                    raise SystemExit("KVCR cache slot and count must be decimal integers")
-                slot = int(raw_slot)
-                slot_count = int(raw_count)
-                if slot_count <= 0 or slot >= slot_count:
+                # The slot is node-stable: a hash of the node and guard index,
+                # not of a pod index that changes when the pod is rescheduled.
+                node_name = os.environ["KVCR_NODE_NAME"]
+                raw_index = os.environ["KVCR_GUARD_INDEX"]
+                raw_count = os.environ["KVCR_GUARD_COUNT"]
+                if not node_name:
+                    raise SystemExit("KVCR node name must not be empty")
+                if not raw_index.isdecimal() or not raw_count.isdecimal():
+                    raise SystemExit("KVCR guard index and count must be decimal integers")
+                guard_index = int(raw_index)
+                guard_count = int(raw_count)
+                if guard_count <= 0 or guard_index >= guard_count:
                     raise SystemExit(
-                        f"KVCR cache slot {slot} is outside [0, {slot_count})"
+                        f"KVCR guard index {guard_index} is outside [0, {guard_count})"
                     )
+                digest = hashlib.sha256(
+                    "\0".join(
+                        ["kvcr-guard-slot/v1", node_name, str(guard_index)]
+                    ).encode()
+                ).digest()
                 return (
                     "01010101010101010101010101010101:"
                     "02020202020202020202020202020202/"
-                    f"0303030303030303/{slot:032x}"
+                    f"0303030303030303/{digest[:16].hex()}"
                 )
 
             print(json.dumps({
@@ -112,12 +123,14 @@ spec:
             value: "9090"
           - name: DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS
             value: "300"
-          - name: KVCR_CACHE_SLOT
+          - name: KVCR_NODE_NAME
             valueFrom:
               fieldRef:
-                fieldPath: metadata.labels['grove.io/podclique-pod-index']
-          - name: KVCR_CACHE_SLOT_COUNT
-            value: "2"
+                fieldPath: spec.nodeName
+          - name: KVCR_GUARD_INDEX
+            value: "0"
+          - name: KVCR_GUARD_COUNT
+            value: "1"
           - name: POD_IP
             valueFrom:
               fieldRef:
