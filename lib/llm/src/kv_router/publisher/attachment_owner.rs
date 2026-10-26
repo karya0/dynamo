@@ -74,8 +74,9 @@ impl KvStateAttachmentOwner {
         worker_id: WorkerId,
         descriptors: Vec<KvStateAttachmentDescriptor>,
     ) -> Result<Arc<Self>> {
+        validate_descriptors(&descriptors)?;
         let component = endpoint.component().clone();
-        let host_namespace = host_namespace(&descriptors)?;
+        let host_namespace = host_namespace(&descriptors);
         let host = discover_single_host(&component, &host_namespace).await?;
         let producer_instance = producer_instance(&endpoint).await?;
 
@@ -195,9 +196,9 @@ fn validate_descriptors(descriptors: &[KvStateAttachmentDescriptor]) -> Result<(
 
 /// The namespace that hosts the state agent: the one the descriptors' shared
 /// `kv_state_endpoint` names, which is the worker's own namespace by default.
-fn host_namespace(descriptors: &[KvStateAttachmentDescriptor]) -> Result<String> {
-    validate_descriptors(descriptors)?;
-    Ok(descriptors[0].kv_state_endpoint.namespace.clone())
+/// Call only on descriptors that passed `validate_descriptors`.
+fn host_namespace(descriptors: &[KvStateAttachmentDescriptor]) -> String {
+    descriptors[0].kv_state_endpoint.namespace.clone()
 }
 
 /// Resolve the single live V2 state-agent host in `namespace`.
@@ -795,6 +796,9 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(found.host_instance, host().host_instance);
+        // The default endpoint (same namespace as the host) still attaches.
+        attach(&discovery, descriptors()).await.unwrap();
+        assert_eq!(discovery.list(intent_query()).await.unwrap().len(), 2);
     }
 
     /// A late advertisement must wake the watch and be found by the re-list.
@@ -938,7 +942,8 @@ mod tests {
         discovery: &Arc<dyn Discovery>,
         descriptors: Vec<KvStateAttachmentDescriptor>,
     ) -> Result<KvStateHostAdvertisement> {
-        let namespace = host_namespace(&descriptors)?;
+        validate_descriptors(&descriptors)?;
+        let namespace = host_namespace(&descriptors);
         let host = await_single_host(
             discovery.as_ref(),
             &namespace,
@@ -972,9 +977,13 @@ mod tests {
     #[tokio::test]
     async fn host_in_another_namespace_is_discovered_and_attached() {
         let discovery = mock_discovery();
-        register_host_in(discovery.as_ref(), "shared", 41, &host_in("shared")).await;
         // A host in the worker's own namespace must not be consulted.
         register_host_in(discovery.as_ref(), "dgd-a", 42, &host_in("dgd-a")).await;
+        let error = attach(&discovery, descriptors_for("shared/backend/generate"))
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("exactly one live V2 host, found 0"));
+        register_host_in(discovery.as_ref(), "shared", 41, &host_in("shared")).await;
         let host = attach(&discovery, descriptors_for("shared/backend/generate"))
             .await
             .unwrap();
@@ -987,14 +996,6 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-    }
-
-    #[tokio::test]
-    async fn default_same_namespace_endpoint_still_attaches() {
-        let discovery = mock_discovery();
-        register_host(discovery.as_ref(), 41, &host()).await;
-        attach(&discovery, descriptors()).await.unwrap();
-        assert_eq!(discovery.list(intent_query()).await.unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -1015,29 +1016,5 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-    }
-
-    #[tokio::test]
-    async fn zero_hosts_in_the_endpoint_namespace_fail_even_if_the_worker_namespace_has_one() {
-        let discovery = mock_discovery();
-        register_host_in(discovery.as_ref(), "dgd-a", 41, &host_in("dgd-a")).await;
-        let error = attach(&discovery, descriptors_for("shared/backend/generate"))
-            .await
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("exactly one live V2 host, found 0"));
-    }
-
-    #[tokio::test]
-    async fn two_hosts_in_the_endpoint_namespace_fail_closed() {
-        let discovery = mock_discovery();
-        register_host_in(discovery.as_ref(), "shared", 41, &host_in("shared")).await;
-        let mut second = host_in("shared");
-        second.host_instance.instance_id = 2;
-        second.control_target = second.host_instance.clone();
-        register_host_in(discovery.as_ref(), "shared", 42, &second).await;
-        let error = attach(&discovery, descriptors_for("shared/backend/generate"))
-            .await
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("exactly one live V2 host, found 2"));
     }
 }
