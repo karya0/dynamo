@@ -4,8 +4,13 @@
 # Per-model KV state agent that lives outside any DynamoGraphDeployment. Workers
 # and routers in every DGD of the model reach it through the Dynamo namespace
 # below (workers pass --kv-state-endpoint kvcr-qwen3-0-6b/backend/generate).
-# Apply into the same Kubernetes namespace as the DGDs. Replace --max-slots with
-# (number of nodes) x (Guards per node).
+# Apply into the same Kubernetes namespace as the DGDs.
+#
+# --max-slots (KVCR_STATE_AGENT_MAX_SLOTS, set before envsubst) is a lifetime
+# budget, not a live count: slots are durable and are not reclaimed when a node
+# goes away. Set it to (number of GPU nodes the workers may ever use) x (Guards
+# per node). If it is too small the host rejects new owners; watch
+# kv_state_agent_capacity_rejected_total.
 #
 # Exactly one replica must exist per Dynamo namespace: workers fail closed when
 # they find zero or more than one live host. Recreate avoids two hosts during a
@@ -71,18 +76,14 @@ spec:
         - -m
         - dynamo.kv_state_agent
         - --max-slots
-        - "2"
+        - "${KVCR_STATE_AGENT_MAX_SLOTS}"
         command:
         - python3
         env:
         - name: CONTAINER_NAME
           value: main
-        - name: DYN_COMPONENT
-          value: kv_state_agent
         - name: DYN_DISCOVERY_BACKEND
           value: kubernetes
-        - name: DYN_HEALTH_CHECK_ENABLED
-          value: "false"
         - name: DYN_KUBE_DISCOVERY_MODE
           value: container
         - name: DYN_NAMESPACE

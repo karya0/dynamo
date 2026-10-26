@@ -5,6 +5,25 @@
 # (agg-state-agent.yaml) and a node-local Guard that is not a sidecar. The
 # Guard socket is read from a hostPath directory; this worker only waits for it.
 # Render with envsubst the same way as agg-memory-service.yaml.
+#
+# One worker per model per node. The cache owner slot is a hash of the node name
+# and Guard index only, so two workers of the same model on one node (from two
+# DGDs, or an old DGD's pod that still exists while a recreated one lands) would
+# register two intents for one owner, and the state-agent host would detach and
+# fail that owner for both. The required anti-affinity below on the model label
+# enforces one worker per model per node until the host keeps the current
+# attachment on a second intent (P6b). Use the same kvcr.nvidia.com/model value
+# in every DGD of the model, and keep the kv-state-endpoint namespace equal to it.
+#
+# --kv-state-endpoint must be <namespace>/<component>/<endpoint> with all three
+# parts: EndpointId::from silently reinterprets one- and two-part strings.
+#
+# Guard attach: attach_mode "path" (the current default) needs the pool directory
+# at the same absolute path in the worker and in the Guard, which is why the pool
+# hostPath is mounted at its host path. The kvcr guard-daemonset branch's fd mode
+# (attach_mode "fd") removes the worker's pool mount. Any pod allowed hostPath on
+# the node can reach the Guard socket and the pool; this is the same trust model
+# as the base manifest.
 
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -28,20 +47,19 @@ spec:
     type: frontend
   - name: worker
     podTemplate:
+      metadata:
+        labels:
+          kvcr.nvidia.com/model: kvcr-qwen3-0-6b
       spec:
         affinity:
           podAntiAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
                 matchExpressions:
-                - key: nvidia.com/dynamo-component
+                - key: kvcr.nvidia.com/model
                   operator: In
                   values:
-                  - worker
-                - key: nvidia.com/dynamo-graph-deployment-name
-                  operator: In
-                  values:
-                  - vllm-agg-kvcr-guard-daemonset
+                  - kvcr-qwen3-0-6b
               topologyKey: kubernetes.io/hostname
         containers:
         - args:
@@ -121,8 +139,6 @@ spec:
             value: container
           - name: DYN_SYSTEM_PORT
             value: "9090"
-          - name: DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS
-            value: "300"
           - name: KVCR_NODE_NAME
             valueFrom:
               fieldRef:

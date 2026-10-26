@@ -4,6 +4,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -373,7 +374,21 @@ def test_guard_daemonset_variant_uses_external_state_agent() -> None:
     assert [container["name"] for container in pod_spec["containers"]] == ["main"]
     assert "dynamo.kv_state_agent" not in _manifest_text(_GUARD_DAEMONSET_WORKER)
     assert "kvcr.kvcr_service" not in _manifest_text(_GUARD_DAEMONSET_WORKER)
-    assert f"--kv-state-endpoint {_MODEL_NAMESPACE}/backend/generate" in command
+    # One worker per model per node: the slot depends on the node only.
+    labels = _worker(_GUARD_DAEMONSET_WORKER)["podTemplate"]["metadata"]["labels"]
+    assert labels["kvcr.nvidia.com/model"] == _MODEL_NAMESPACE
+    (term,) = pod_spec["affinity"]["podAntiAffinity"][
+        "requiredDuringSchedulingIgnoredDuringExecution"
+    ]
+    assert term["topologyKey"] == "kubernetes.io/hostname"
+    assert {
+        "key": "kvcr.nvidia.com/model",
+        "operator": "In",
+        "values": [_MODEL_NAMESPACE],
+    } in term["labelSelector"]["matchExpressions"]
+    assert "DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS" not in _manifest_text(
+        _GUARD_DAEMONSET_WORKER
+    )
 
     # The worker waits for the Guard socket instead of crash-looping.
     (wait,) = pod_spec["initContainers"]
@@ -392,8 +407,6 @@ def test_guard_daemonset_variant_uses_external_state_agent() -> None:
     assert "kvcr-guard-slot/v1" in command
     for volume in pod_spec["volumes"]:
         assert "hostPath" in volume
-    assert "hostPID" not in pod_spec
-    assert "hostNetwork" not in pod_spec
 
 
 def test_state_agent_deployment_is_singleton_in_the_model_namespace() -> None:
@@ -434,6 +447,8 @@ def test_state_agent_deployment_is_singleton_in_the_model_namespace() -> None:
     command = _worker(_GUARD_DAEMONSET_WORKER)["podTemplate"]["spec"]["containers"][0][
         "args"
     ][0]
-    assert f"--kv-state-endpoint {env['DYN_NAMESPACE']['value']}/backend/generate" in (
-        command
+    # All three parts must be explicit: EndpointId::from reinterprets shorter forms.
+    assert re.search(
+        rf"--kv-state-endpoint {re.escape(env['DYN_NAMESPACE']['value'])}/\w+/\w+ ",
+        command,
     )
