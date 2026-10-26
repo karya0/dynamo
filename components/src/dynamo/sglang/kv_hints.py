@@ -18,6 +18,7 @@ from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     resolved_server_args,
 )
+from dynamo.sglang.storage_config import load_hicache_storage_extra_config_file
 
 
 def kv_hint_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[str, Any]:
@@ -119,11 +120,13 @@ def publish_kvcr_hint_capabilities(
         return
     extra = server_args.hicache_storage_backend_extra_config
     if isinstance(extra, str):
-        if extra.startswith("@"):
-            # The SGLang controller resolves file configs. Avoid advertising a
-            # guessed endpoint until registration can read its resolved result.
-            raise ValueError("KVCR hint publication requires inline JSON configuration")
-        extra = json.loads(extra)
+        extra = extra.strip()
+        if not extra:
+            extra = {}
+        elif extra.startswith("@"):
+            extra = load_hicache_storage_extra_config_file(extra[1:])
+        else:
+            extra = json.loads(extra)
     if extra is None:
         extra = {}
     if not isinstance(extra, Mapping):

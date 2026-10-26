@@ -2,16 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """Router-selected KV hints reach the in-process SGLang engine unchanged."""
 
+import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+import yaml
 
 from dynamo.common.constants import (
     KV_HINT_TRANSFER_CAPABILITY_KEY,
     KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
 )
-from dynamo.llm import WorkerType
+from dynamo.llm import ModelType, WorkerType
 from dynamo.sglang.kv_hints import (
     kv_hint_kwargs,
     kvcr_hint_endpoints,
@@ -238,3 +241,133 @@ def test_linker_ipv6_group_offsets_are_unambiguous():
         "0": "tcp://[2001:db8::1]:29000",
         "1": "tcp://[2001:db8::1]:29002",
     }
+
+
+@pytest.mark.parametrize(
+    "filename, content",
+    [
+        (
+            "extra.json",
+            '{"control_advertise_host": "192.0.2.1", "control_port": 29000, "enable_remote_hint": true}',
+        ),
+        (
+            "extra.toml",
+            'control_advertise_host = "192.0.2.1"\ncontrol_port = 29000\nenable_remote_hint = true\n',
+        ),
+        (
+            "extra.yaml",
+            "control_advertise_host: 192.0.2.1\ncontrol_port: 29000\nenable_remote_hint: true\n",
+        ),
+        (
+            "extra.yml",
+            "control_advertise_host: 192.0.2.1\ncontrol_port: 29000\nenable_remote_hint: true\n",
+        ),
+    ],
+)
+@pytest.mark.parametrize("mode", ["hicache", "linker"])
+def test_registration_reads_at_file_config(tmp_path, filename, content, mode):
+    path = tmp_path / filename
+    path.write_text(content, encoding="utf-8")
+    _, metadata = _linker_registration(
+        f"  @{path}  ",
+        enable_unified_cache_external_linker=mode == "linker",
+        enable_hierarchical_cache=mode == "hicache",
+        hicache_storage_backend="kvcr",
+    )
+    assert metadata[KV_HINT_TRANSFER_CAPABILITY_KEY] is True
+    assert metadata[KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY] == {
+        "0": "tcp://192.0.2.1:29000",
+        "1": "tcp://192.0.2.1:29002",
+    }
+
+
+@pytest.mark.parametrize("extra", ["", " \n\t "])
+def test_registration_normalizes_blank_config(extra):
+    _, metadata = _linker_registration(
+        extra,
+        enable_unified_cache_external_linker=False,
+        enable_hierarchical_cache=True,
+        hicache_storage_backend="kvcr",
+    )
+    assert metadata[KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY] == {
+        "0": "tcp://127.0.0.1:32100",
+        "1": "tcp://127.0.0.1:32102",
+    }
+    _, metadata = _linker_registration(extra)
+    assert not metadata  # Blank linker configs must not invent source coordinates.
+
+
+@pytest.mark.parametrize(
+    "filename, content, error",
+    [
+        (None, "{", ValueError),
+        (None, "[]", ValueError),
+        ("extra.json", "{", ValueError),
+        ("extra.toml", "control_port = [", ValueError),
+        ("extra.yaml", "control_port: [", yaml.YAMLError),
+        ("extra.json", "[]", ValueError),
+        ("extra.ini", "control_port = 29000", ValueError),
+        ("missing.json", None, OSError),
+    ],
+)
+def test_registration_rejects_invalid_config(tmp_path, filename, content, error):
+    extra = content
+    if filename is not None:
+        path = tmp_path / filename
+        if content is not None:
+            path.write_text(content, encoding="utf-8")
+        extra = f"@{path}"
+    with pytest.raises(error):
+        _linker_registration(extra)
+
+
+@pytest.mark.parametrize(
+    "output_type, worker_type, forwards_kv_hints",
+    [
+        (ModelType.Embedding, WorkerType.Aggregated, False),
+        (ModelType.Chat | ModelType.Completions, WorkerType.Aggregated, False),
+        (ModelType.Chat | ModelType.Completions, WorkerType.Decode, True),
+        (ModelType.Prefill, WorkerType.Prefill, True),
+    ],
+)
+def test_registration_requires_handler_hint_forwarding(
+    monkeypatch, output_type, worker_type, forwards_kv_hints
+):
+    from dynamo.sglang import register
+
+    args, metadata = _linker_registration(
+        {"advertise_host": "192.0.2.1", "control_port": 29000}
+    )
+    args.model_path = args.served_model_name = "test-model"
+    args.page_size = 64
+    metadata.clear()
+    runtime = SimpleNamespace(
+        set_engine_specific=lambda key, value: metadata.__setitem__(
+            key, json.loads(value)
+        )
+    )
+    monkeypatch.setattr(register, "get_runtime_config", AsyncMock(return_value=runtime))
+    register_model = AsyncMock()
+    monkeypatch.setattr(register, "register_model", register_model)
+    dynamo_args = SimpleNamespace(
+        use_sglang_tokenizer=False, model_source_uri=None, custom_jinja_template=None
+    )
+    # Omit the flag for non-forwarding handlers to exercise the safe default,
+    # including DLLM-style handlers whose output type still looks like chat.
+    kwargs = {"forwards_kv_hints": True} if forwards_kv_hints else {}
+    asyncio.run(
+        register.register_model_with_readiness_gate(
+            _HintEngine(),
+            None,
+            args,
+            dynamo_args,
+            output_type=output_type,
+            worker_type=worker_type,
+            **kwargs,
+        )
+    )
+    register_model.assert_awaited_once()
+    assert (KV_HINT_TRANSFER_CAPABILITY_KEY in metadata) is forwards_kv_hints
+    assert (
+        KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY in metadata
+    ) is forwards_kv_hints

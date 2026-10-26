@@ -5,7 +5,6 @@ import asyncio
 import json
 import logging
 import os
-import sys
 from typing import Any, List, Optional
 
 import sglang as sgl
@@ -14,11 +13,6 @@ from sglang.srt.environ import envs
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
 
 from dynamo._core import Endpoint
 from dynamo.common.configuration.groups.router_args import build_router_config
@@ -64,6 +58,7 @@ from dynamo.sglang.gateway import (
     gateway_engine_id,
 )
 from dynamo.sglang.kv_hints import publish_kvcr_hint_capabilities
+from dynamo.sglang.storage_config import load_hicache_storage_extra_config_file
 from dynamo.sglang.video_routing import publish_sglang_qwen_video_processor_contract
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
@@ -187,6 +182,7 @@ async def _register_model_with_runtime_config(
     worker_type: WorkerType,
     needs: Optional[List[List[WorkerType]]] = None,
     serves_lora_load: bool = False,
+    forwards_kv_hints: bool = False,
 ) -> bool:
     """Register LLM with the Dynamo runtime.
 
@@ -202,12 +198,14 @@ async def _register_model_with_runtime_config(
         needs: DNF list of peer roles this worker requires to serve. Empty (or
             `None`) means no peer dependency, which is the correct value for
             Aggregated workers.
+        forwards_kv_hints: Whether the registered handler forwards router hints
+            to the engine. Only LLM decode and prefill handlers opt in.
 
     Returns:
         True if registration succeeded, False otherwise.
     """
     runtime_config = await get_runtime_config(engine, server_args, dynamo_args)
-    if runtime_config is not None:
+    if runtime_config is not None and forwards_kv_hints:
         publish_kvcr_hint_capabilities(runtime_config, engine, server_args, worker_type)
 
     if dynamo_args.use_sglang_tokenizer and not (
@@ -309,24 +307,6 @@ def _get_bootstrap_info_for_config(
     return compute_bootstrap_address(engine)
 
 
-def _load_hicache_storage_extra_config_file(path: str) -> Any:
-    """Load an ``@path`` extra config the way SGLang's HiCache does.
-
-    SGLang accepts ``.json``, ``.toml``, ``.yaml`` and ``.yml`` files.
-    """
-    ext = os.path.splitext(path)[1].lower()
-    if ext == ".json":
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    if ext == ".toml":
-        with open(path, "rb") as f:
-            return tomllib.load(f)
-    if ext in (".yaml", ".yml"):
-        with open(path, encoding="utf-8") as f:
-            return yaml.safe_load(f)
-    raise ValueError(f"unsupported config file {path!r} (format {ext!r})")
-
-
 def _parse_hicache_storage_extra_config(
     raw_extra_config: Optional[Any],
 ) -> dict[str, Any]:
@@ -342,7 +322,7 @@ def _parse_hicache_storage_extra_config(
             return {}
         try:
             if raw_extra_config.startswith("@"):
-                parsed = _load_hicache_storage_extra_config_file(raw_extra_config[1:])
+                parsed = load_hicache_storage_extra_config_file(raw_extra_config[1:])
             else:
                 parsed = json.loads(raw_extra_config)
         except (OSError, ValueError, yaml.YAMLError) as e:
@@ -746,6 +726,7 @@ async def register_model_with_readiness_gate(
     worker_type: WorkerType,
     needs: Optional[List[List[WorkerType]]] = None,
     serves_lora_load: bool = False,
+    forwards_kv_hints: bool = False,
 ) -> None:
     """Wrapper function to register LLM with the Dynamo runtime and use optional readiness gate to signal success.
 
@@ -759,6 +740,7 @@ async def register_model_with_readiness_gate(
         readiness_gate: Optional event to signal when registration completes.
         worker_type: Topology role; see `_register_model_with_runtime_config`.
         needs: DNF peer requirements; see `_register_model_with_runtime_config`.
+        forwards_kv_hints: Whether this handler forwards router hints to the engine.
 
     Raises:
         RuntimeError: If model registration fails.
@@ -773,6 +755,7 @@ async def register_model_with_readiness_gate(
         worker_type=worker_type,
         needs=needs,
         serves_lora_load=serves_lora_load,
+        forwards_kv_hints=forwards_kv_hints,
     )
     if not registration_success:
         logging.error("Model registration failed; shutting down")

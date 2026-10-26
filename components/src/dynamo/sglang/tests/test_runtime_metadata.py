@@ -9,6 +9,7 @@ from unittest.mock import Mock
 import pytest
 
 from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY, TokenBudget
+from dynamo.sglang import storage_config
 from dynamo.sglang.capacity import (
     get_hicache_native_offloading_capacity,
     get_spec_decode_runtime_data,
@@ -481,7 +482,7 @@ def test_mooncake_key_prefix_reads_at_file_extra_config(
 
     config_path = tmp_path / filename
     config_path.write_bytes(content.encode("utf-8"))
-    monkeypatch.setattr(register, "open", open_with_ascii_default, raising=False)
+    monkeypatch.setattr(storage_config, "open", open_with_ascii_default, raising=False)
     monkeypatch.setattr(register, "sglang_uses_mla_backend", lambda _: False)
     server_args = SimpleNamespace(
         hicache_storage_backend="mooncake",
