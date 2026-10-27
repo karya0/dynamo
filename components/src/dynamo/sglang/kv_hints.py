@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""KVCR transfer capability and in-process request-hint forwarding."""
+"""Forward router KV hints and advertise KVCR sources to Dynamo."""
 
 from __future__ import annotations
 
@@ -22,12 +22,7 @@ from dynamo.sglang.storage_config import load_hicache_storage_extra_config_file
 
 
 def kv_hint_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[str, Any]:
-    """Dynamo's private kv_hint envelope maps to SGLang's kv_hints input.
-
-    The router creates the envelope after worker selection; do not pull a
-    client-supplied hint out of extra_args or nvext. Older engines can ignore
-    this advisory input, but must not advertise transfer capability.
-    """
+    """Pass the private router hint only when the engine accepts ``kv_hints``."""
     hint = request.get("kv_hint")
     if not isinstance(hint, Mapping):
         return {}
@@ -35,11 +30,7 @@ def kv_hint_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def kvcr_mode(server_args: Any) -> str | None:
-    """The direct linker or the HiCache storage backend; None without KVCR.
-
-    SGLang rejects enabling both, and both read the KVCR options from
-    --hicache-storage-backend-extra-config.
-    """
+    """Return the active KVCR integration mode, if any."""
     if (
         getattr(server_args, "enable_unified_cache_external_linker", False)
         and getattr(server_args, "unified_cache_external_linker_backend", None)
@@ -71,8 +62,7 @@ def kvcr_hint_endpoints(
     host = extra_config.get("control_advertise_host", "127.0.0.1")
     port = extra_config.get("control_port", 32100)
     if mode == "linker":
-        # Linker revisions have different defaults (19500 vs OS-assigned 0)
-        # and option names. Require explicit coordinates rather than guess.
+        # Linker defaults differ from HiCache; require explicit coordinates.
         host = extra_config.get("advertise_host")
         alternate = extra_config.get("control_advertise_host")
         if host is not None and alternate is not None and host != alternate:
@@ -152,8 +142,7 @@ def publish_kvcr_hint_capabilities(
         # Local-only/default linkers can still serve, but cannot advertise a
         # guessed source-control endpoint to another worker.
         return
-    # WorkerType is a PyO3 enum, not enum.Enum: its wire role is __str__,
-    # and accessing .value aborts registration after the model has loaded.
+    # WorkerType is a PyO3 enum; str() gives its wire role.
     role = str(worker_type)
     if role == "agg":
         role = "aggregated"

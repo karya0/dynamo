@@ -16,10 +16,7 @@ else:
 
 
 def load_hicache_storage_extra_config_file(path: str) -> Any:
-    """Load an ``@path`` extra config the way SGLang's HiCache does.
-
-    SGLang accepts ``.json``, ``.toml``, ``.yaml`` and ``.yml`` files.
-    """
+    """Load an ``@path`` config in SGLang's supported JSON/TOML/YAML formats."""
     ext = os.path.splitext(path)[1].lower()
     if ext == ".json":
         with open(path, encoding="utf-8") as f:

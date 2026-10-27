@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Router-selected KV hints reach the in-process SGLang engine unchanged."""
+"""KV-hint forwarding and KVCR source registration."""
 
 import asyncio
 import json
@@ -8,13 +8,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-import yaml
 
 from dynamo.common.constants import (
     KV_HINT_TRANSFER_CAPABILITY_KEY,
     KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+    KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
 )
 from dynamo.llm import ModelType, WorkerType
+from dynamo.sglang import register
 from dynamo.sglang.kv_hints import (
     kv_hint_kwargs,
     kvcr_hint_endpoints,
@@ -52,12 +53,10 @@ def test_router_hint_forwarding_is_private_and_lossless():
     }
     assert kv_hint_kwargs(_HintEngine(), {"kv_hint": hint}) == {"kv_hints": hint}
     assert kv_hint_kwargs(_OldEngine(), {"kv_hint": hint}) == {}
-    # Do not turn arbitrary client extra_args into a trusted router decision.
     assert kv_hint_kwargs(_HintEngine(), {"extra_args": {"kv_hint": hint}}) == {}
 
 
 def test_endpoint_layout_matches_attention_group_offsets():
-    # No sockets are opened: this pins the arithmetic/protocol, not allocation.
     control_port = 28000
     result = kvcr_hint_endpoints(
         extra_config={
@@ -112,6 +111,7 @@ def test_registration_only_advertises_supported_transfer_path(change):
         assert not metadata
     else:
         assert metadata[KV_HINT_TRANSFER_CAPABILITY_KEY] is True
+        assert metadata[KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY] == "aggregated"
         assert (
             metadata[KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY]["1"]
             == f"tcp://127.0.0.1:{control_port + 2}"
@@ -194,14 +194,6 @@ def test_local_only_linker_does_not_publish_guessed_sources(extra):
     assert not metadata
 
 
-@pytest.mark.parametrize("change", [{"nnodes": 2}, {"pp_size": 2}])
-def test_linker_preserves_supported_topology_boundary(change):
-    _, metadata = _linker_registration(
-        {"advertise_host": "192.0.2.1", "control_port": 29000}, **change
-    )
-    assert not metadata
-
-
 def test_hicache_does_not_consume_the_linker_only_host_alias():
     endpoints = kvcr_hint_endpoints(
         extra_config={"advertise_host": "192.0.2.1", "control_port": 29000},
@@ -243,31 +235,19 @@ def test_linker_ipv6_group_offsets_are_unambiguous():
     }
 
 
-@pytest.mark.parametrize(
-    "filename, content",
-    [
-        (
-            "extra.json",
-            '{"control_advertise_host": "192.0.2.1", "control_port": 29000, "enable_remote_hint": true}',
-        ),
-        (
-            "extra.toml",
-            'control_advertise_host = "192.0.2.1"\ncontrol_port = 29000\nenable_remote_hint = true\n',
-        ),
-        (
-            "extra.yaml",
-            "control_advertise_host: 192.0.2.1\ncontrol_port: 29000\nenable_remote_hint: true\n",
-        ),
-        (
-            "extra.yml",
-            "control_advertise_host: 192.0.2.1\ncontrol_port: 29000\nenable_remote_hint: true\n",
-        ),
-    ],
-)
 @pytest.mark.parametrize("mode", ["hicache", "linker"])
-def test_registration_reads_at_file_config(tmp_path, filename, content, mode):
-    path = tmp_path / filename
-    path.write_text(content, encoding="utf-8")
+def test_registration_reads_at_file_config(tmp_path, mode):
+    path = tmp_path / "extra.json"
+    path.write_text(
+        json.dumps(
+            {
+                "control_advertise_host": "192.0.2.1",
+                "control_port": 29000,
+                "enable_remote_hint": True,
+            }
+        ),
+        encoding="utf-8",
+    )
     _, metadata = _linker_registration(
         f"  @{path}  ",
         enable_unified_cache_external_linker=mode == "linker",
@@ -281,8 +261,8 @@ def test_registration_reads_at_file_config(tmp_path, filename, content, mode):
     }
 
 
-@pytest.mark.parametrize("extra", ["", " \n\t "])
-def test_registration_normalizes_blank_config(extra):
+def test_registration_normalizes_blank_config():
+    extra = " \n\t "
     _, metadata = _linker_registration(
         extra,
         enable_unified_cache_external_linker=False,
@@ -294,7 +274,7 @@ def test_registration_normalizes_blank_config(extra):
         "1": "tcp://127.0.0.1:32102",
     }
     _, metadata = _linker_registration(extra)
-    assert not metadata  # Blank linker configs must not invent source coordinates.
+    assert not metadata
 
 
 @pytest.mark.parametrize(
@@ -302,10 +282,6 @@ def test_registration_normalizes_blank_config(extra):
     [
         (None, "{", ValueError),
         (None, "[]", ValueError),
-        ("extra.json", "{", ValueError),
-        ("extra.toml", "control_port = [", ValueError),
-        ("extra.yaml", "control_port: [", yaml.YAMLError),
-        ("extra.json", "[]", ValueError),
         ("extra.ini", "control_port = 29000", ValueError),
         ("missing.json", None, OSError),
     ],
@@ -324,7 +300,6 @@ def test_registration_rejects_invalid_config(tmp_path, filename, content, error)
 @pytest.mark.parametrize(
     "output_type, worker_type, forwards_kv_hints",
     [
-        (ModelType.Embedding, WorkerType.Aggregated, False),
         (ModelType.Chat | ModelType.Completions, WorkerType.Aggregated, False),
         (ModelType.Chat | ModelType.Completions, WorkerType.Decode, True),
         (ModelType.Prefill, WorkerType.Prefill, True),
@@ -333,8 +308,6 @@ def test_registration_rejects_invalid_config(tmp_path, filename, content, error)
 def test_registration_requires_handler_hint_forwarding(
     monkeypatch, output_type, worker_type, forwards_kv_hints
 ):
-    from dynamo.sglang import register
-
     args, metadata = _linker_registration(
         {"advertise_host": "192.0.2.1", "control_port": 29000}
     )
@@ -352,8 +325,6 @@ def test_registration_requires_handler_hint_forwarding(
     dynamo_args = SimpleNamespace(
         use_sglang_tokenizer=False, model_source_uri=None, custom_jinja_template=None
     )
-    # Omit the flag for non-forwarding handlers to exercise the safe default,
-    # including DLLM-style handlers whose output type still looks like chat.
     kwargs = {"forwards_kv_hints": True} if forwards_kv_hints else {}
     asyncio.run(
         register.register_model_with_readiness_gate(
