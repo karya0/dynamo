@@ -498,6 +498,9 @@ def test_mooncake_key_prefix_reads_at_file_extra_config(
 
     assert runtime_data["extra_backend_tag"] == "équipe"
     assert runtime_data["key_prefix"] == "équipe_Qwen-Qwen3-0.6B"
+    assert storage_config.parse_hicache_storage_extra_config(
+        f"@{config_path}", strict=True
+    ) == {"extra_backend_tag": "équipe"}
 
 
 @pytest.mark.parametrize("filename", ["missing.json", "extra.ini"])
@@ -507,6 +510,15 @@ def test_unreadable_at_file_extra_config_is_ignored(register, tmp_path, filename
         path.write_text("extra_backend_tag = t\n")
 
     assert register._parse_hicache_storage_extra_config(f"@{path}") == {}
+    with pytest.raises((OSError, ValueError)):
+        storage_config.parse_hicache_storage_extra_config(f"@{path}", strict=True)
+
+
+@pytest.mark.parametrize("raw_config", ["{", "[]"])
+def test_storage_config_strict_parsing_preserves_errors(raw_config):
+    assert storage_config.parse_hicache_storage_extra_config(raw_config) == {}
+    with pytest.raises(ValueError):
+        storage_config.parse_hicache_storage_extra_config(raw_config, strict=True)
 
 
 @pytest.mark.parametrize(
