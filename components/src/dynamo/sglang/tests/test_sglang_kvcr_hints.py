@@ -118,7 +118,7 @@ def test_hicache_endpoint_layout_comes_from_scheduler_metadata(change):
         ),
     ],
 )
-def test_registration_requires_a_hint_forwarding_hicache_worker(
+def test_registration_requires_a_hint_forwarding_kvcr_worker(
     monkeypatch, change, forwards_kv_hints, engine_type
 ):
     if _register_import_error is not None:
@@ -192,7 +192,8 @@ def test_registration_requires_a_hint_forwarding_hicache_worker(
             KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
         )
     }
-    if not change and forwards_kv_hints and engine_type is _HintEngine:
+    publishes = not change or change.get("enable_unified_cache_external_linker")
+    if publishes and forwards_kv_hints and engine_type is _HintEngine:
         assert metadata == {
             KV_HINT_TRANSFER_CAPABILITY_KEY: True,
             KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY: "aggregated",

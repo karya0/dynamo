@@ -89,24 +89,41 @@ def kvcr_hint_endpoints(scheduler_infos, rank_bounds) -> dict[str, str]:
     return endpoints
 
 
+def kvcr_linker_enabled(server_args: Any) -> bool:
+    """Whether SGLang runs KVCR as its direct external linker."""
+    return bool(
+        getattr(server_args, "enable_unified_cache_external_linker", False)
+        and getattr(server_args, "unified_cache_external_linker_backend", None)
+        == "kvcr"
+    )
+
+
+def reported_kvcr_hint_endpoints(engine, server_args) -> dict[str, str]:
+    """Source endpoints the scheduler processes reported after engine init."""
+    init_result = getattr(engine, "_scheduler_init_result", None)
+    if init_result is None:
+        return {}
+    return kvcr_hint_endpoints(
+        init_result.scheduler_infos, model_card_dp_rank_bounds(server_args)
+    )
+
+
 def publish_kvcr_hint_capabilities(
     runtime_config, engine, server_args, worker_type
 ) -> None:
-    """Publish only HiCache sources explicitly reported by compatible SGLang."""
+    """Publish only HiCache or direct-linker sources explicitly reported by SGLang."""
     server_args = resolved_server_args(server_args)
     if (
-        not getattr(server_args, "enable_hierarchical_cache", False)
+        not (
+            getattr(server_args, "enable_hierarchical_cache", False)
+            or kvcr_linker_enabled(server_args)
+        )
         or getattr(server_args, "nnodes", 1) != 1
         or getattr(server_args, "pp_size", 1) != 1
         or not filter_supported_async_generate_kwargs(engine, {"kv_hints": None})
     ):
         return
-    init_result = getattr(engine, "_scheduler_init_result", None)
-    if init_result is None:
-        return
-    endpoints = kvcr_hint_endpoints(
-        init_result.scheduler_infos, model_card_dp_rank_bounds(server_args)
-    )
+    endpoints = reported_kvcr_hint_endpoints(engine, server_args)
     if not endpoints:
         return
     for key, value in (
