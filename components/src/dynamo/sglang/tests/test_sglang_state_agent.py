@@ -109,6 +109,9 @@ _TOPIC = '{"publisher":"zmq","endpoint":"tcp://*:5557","topic":"other"}'
         ("config", "serving_mode", DisaggregationMode.DECODE, "aggregated"),
         ("server", "enable_unified_cache_external_linker", False, "linker"),
         ("dynamo", "use_kv_events", False, "KV events"),
+        ("server", "nnodes", 2, "single-node"),
+        ("server", "attn_dp_size", 2, "single-node"),
+        ("dynamo", "gateway_workers", 2, "single-node"),
         *[
             (
                 "server",

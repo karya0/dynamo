@@ -13,7 +13,8 @@ from urllib.parse import urlparse
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import KvStateAttachmentOwner
 from dynamo.sglang._compat import resolved_server_args
-from dynamo.sglang.capacity import kv_event_block_size
+from dynamo.sglang.capacity import kv_event_block_size, model_card_dp_rank_bounds
+from dynamo.sglang.gateway import effective_gateway_workers
 from dynamo.sglang.kv_hints import kvcr_linker_enabled, reported_kvcr_hint_endpoints
 
 _CACHE_OWNER_PATTERN = re.compile(
@@ -64,6 +65,15 @@ def validate_state_agent_worker(config: Any) -> str | None:
     if not kvcr_linker_enabled(server_args) or not dynamo_args.use_kv_events:
         raise ValueError(
             "KVCR state agent requires the direct KVCR linker and KV events"
+        )
+    if (
+        getattr(server_args, "nnodes", 1) != 1
+        or model_card_dp_rank_bounds(server_args) != (0, 1)
+        or effective_gateway_workers(server_args, dynamo_args) > 1
+    ):
+        raise ValueError(
+            "KVCR state agent supports only a single-node worker with one DP "
+            "rank and one gateway process"
         )
     return owner
 
