@@ -60,34 +60,42 @@ def test_router_hint_forwarding_is_private_and_lossless():
 
 
 @pytest.mark.parametrize(
-    "host, control_port, expected_host",
+    "change",
     [
-        ("192.0.2.1", 28000, "192.0.2.1"),
-        ("2001:db8::1", 28000, "[2001:db8::1]"),
-        (None, 28000, None),
-        ("0.0.0.0", 28000, None),
-        ("tcp://192.0.2.1", 28000, None),
-        ("192.0.2.1", True, None),
-        ("192.0.2.1", 65535, None),
+        None,
+        {"source_control_endpoint": "tcp://0.0.0.0:28071"},
+        {"source_control_endpoint": "tcp://worker-a:65536"},
+        {"source_control_endpoint": "http://worker-a:28071"},
+        {"dp_rank": -1},
+        {"dp_rank": 1},
     ],
 )
-def test_hicache_endpoint_layout(host, control_port, expected_host):
-    # Pure address arithmetic: these tests do not bind sockets.
-    kwargs = dict(
-        extra_config={"control_advertise_host": host, "control_port": control_port},
-        dp_size=2,
-        tp_size=2,
-        attn_cp_size=2,
-        pp_size=1,
-    )
-    if expected_host is None:
+def test_hicache_endpoint_layout_comes_from_scheduler_metadata(change):
+    sources = [
+        {
+            "dp_rank": 0,
+            "capabilities": ["router_hint"],
+            "source_control_endpoint": "tcp://worker-a:28071",
+        },
+        {
+            "dp_rank": 1,
+            "capabilities": ["router_hint"],
+            "source_control_endpoint": "tcp://[2001:db8::1]:31217",
+        },
+    ]
+    infos = [{"kv_hint_sources": [source]} for source in sources]
+    if change is not None:
+        sources[0].update(change)
         with pytest.raises(ValueError):
-            kvcr_hint_endpoints(**kwargs)
+            kvcr_hint_endpoints(infos, (0, 2))
     else:
-        assert kvcr_hint_endpoints(**kwargs) == {
-            "0": f"tcp://{expected_host}:{control_port}",
-            "1": f"tcp://{expected_host}:{control_port + 4}",
+        assert kvcr_hint_endpoints(infos, (0, 2)) == {
+            "0": "tcp://worker-a:28071",
+            "1": "tcp://[2001:db8::1]:31217",
         }
+        assert kvcr_hint_endpoints([{}], (0, 2)) == {}
+        with pytest.raises(ValueError, match="every managed DP rank"):
+            kvcr_hint_endpoints(infos[:1], (0, 2))
 
 
 @pytest.mark.parametrize(
@@ -98,7 +106,7 @@ def test_hicache_endpoint_layout(host, control_port, expected_host):
         ({}, True, _OldEngine),
         ({"nnodes": 2}, True, _HintEngine),
         ({"pp_size": 2}, True, _HintEngine),
-        ({"hicache_storage_backend": "mooncake"}, True, _HintEngine),
+        ({"enable_hierarchical_cache": False}, True, _HintEngine),
         (
             {
                 "enable_hierarchical_cache": False,
@@ -108,37 +116,13 @@ def test_hicache_endpoint_layout(host, control_port, expected_host):
             True,
             _HintEngine,
         ),
-        ({"hicache_storage_backend_extra_config": " \n\t "}, True, _HintEngine),
-        ({"hicache_storage_backend_extra_config": {}}, True, _HintEngine),
-        (
-            {
-                "hicache_storage_backend_extra_config": {
-                    "control_advertise_host": "192.0.2.1",
-                    "enable_remote_hint": False,
-                }
-            },
-            True,
-            _HintEngine,
-        ),
     ],
 )
 def test_registration_requires_a_hint_forwarding_hicache_worker(
-    monkeypatch, tmp_path, change, forwards_kv_hints, engine_type
+    monkeypatch, change, forwards_kv_hints, engine_type
 ):
     if _register_import_error is not None:
         raise _register_import_error
-    control_port = 28000
-    path = tmp_path / "extra.json"
-    path.write_text(
-        json.dumps(
-            {
-                "control_advertise_host": "192.0.2.1",
-                "control_port": control_port,
-                "enable_remote_hint": True,
-            }
-        ),
-        encoding="utf-8",
-    )
     args = SimpleNamespace(
         **{
             "enable_hierarchical_cache": True,
@@ -151,7 +135,8 @@ def test_registration_requires_a_hint_forwarding_hicache_worker(
             "page_size": 64,
             "model_path": "test-model",
             "served_model_name": "test-model",
-            "hicache_storage_backend_extra_config": f"  @{path}  ",
+            # Publication must not parse config or derive ports from it.
+            "hicache_storage_backend_extra_config": "not JSON",
             **change,
         }
     )
@@ -168,9 +153,26 @@ def test_registration_requires_a_hint_forwarding_hicache_worker(
         use_sglang_tokenizer=False, model_source_uri=None, custom_jinja_template=None
     )
     kwargs = {"forwards_kv_hints": True} if forwards_kv_hints else {}
+    engine = engine_type()
+    engine._scheduler_init_result = SimpleNamespace(
+        scheduler_infos=[
+            {
+                "kv_hint_sources": [
+                    {
+                        "dp_rank": rank,
+                        "capabilities": ["router_hint"],
+                        "source_control_endpoint": endpoint,
+                    }
+                    for rank, endpoint in enumerate(
+                        ("tcp://worker-a:28071", "tcp://worker-a:31217")
+                    )
+                ]
+            }
+        ]
+    )
     asyncio.run(
         register.register_model_with_readiness_gate(
-            engine_type(),
+            engine,
             None,
             args,
             dynamo_args,
@@ -195,8 +197,8 @@ def test_registration_requires_a_hint_forwarding_hicache_worker(
             KV_HINT_TRANSFER_CAPABILITY_KEY: True,
             KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY: "aggregated",
             KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: {
-                "0": f"tcp://192.0.2.1:{control_port}",
-                "1": f"tcp://192.0.2.1:{control_port + 2}",
+                "0": "tcp://worker-a:28071",
+                "1": "tcp://worker-a:31217",
             },
         }
     else:
