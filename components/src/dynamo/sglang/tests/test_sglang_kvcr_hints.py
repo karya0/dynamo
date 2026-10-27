@@ -15,7 +15,6 @@ from dynamo.common.constants import (
     KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
 )
 from dynamo.llm import ModelType, WorkerType
-from dynamo.sglang import register
 from dynamo.sglang.kv_hints import (
     kv_hint_kwargs,
     kvcr_hint_endpoints,
@@ -308,6 +307,8 @@ def test_registration_rejects_invalid_config(tmp_path, filename, content, error)
 def test_registration_requires_handler_hint_forwarding(
     monkeypatch, output_type, worker_type, forwards_kv_hints
 ):
+    from dynamo.sglang import register
+
     args, metadata = _linker_registration(
         {"advertise_host": "192.0.2.1", "control_port": 29000}
     )
