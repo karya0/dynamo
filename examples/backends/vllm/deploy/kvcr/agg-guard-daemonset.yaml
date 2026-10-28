@@ -4,7 +4,7 @@
 # Worker for the Guard (guard-daemonset.yaml) and state agent (agg-state-agent.yaml)
 # that live outside the DGD. The socket is a hostPath dir at the same absolute path
 # as in the Guard; the pool is not mounted, the Guard passes it over the claim
-# socket. hostNetwork and uid 2000 match the Guard.
+# socket. hostNetwork and uid 1000 match the Guard.
 #
 # One worker per model per node: the cache owner slot hashes the node name and
 # Guard index only, so a second worker of the model on a node would collide on one
@@ -42,7 +42,7 @@ spec:
         hostNetwork: true
         securityContext:
           runAsGroup: 0
-          runAsUser: 2000
+          runAsUser: 1000
         affinity:
           podAntiAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:

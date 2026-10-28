@@ -8,7 +8,7 @@
 # hostNetwork: the Guard binds the control address the worker advertises, so both
 # share the node's network namespace. Only the Guard mounts the pool dir; the worker
 # receives the pool over the claim socket and mounts only the socket dir. The root
-# init container chowns the dirs to uid 2000, which both run as. The state agent and
+# init container chowns the dirs to uid 1000, which both run as. The state agent and
 # its ServiceAccount/Role are in agg-state-agent.yaml and README.md.
 apiVersion: apps/v1
 kind: DaemonSet
@@ -33,7 +33,7 @@ spec:
         key: nvidia.com/gpu
         operator: Exists
       securityContext:
-        runAsUser: 2000
+        runAsUser: 1000
         runAsGroup: 0
       initContainers:
       - name: perms
@@ -42,7 +42,7 @@ spec:
         - sh
         - -c
         - >-
-          chown 2000:0 /run/kvcr/qwen3-0.6b /dev/shm/kvcr/qwen3-0.6b &&
+          chown 1000:0 /run/kvcr/qwen3-0.6b /dev/shm/kvcr/qwen3-0.6b &&
           chmod 0770 /run/kvcr/qwen3-0.6b /dev/shm/kvcr/qwen3-0.6b
         securityContext:
           runAsUser: 0

@@ -124,10 +124,10 @@ KVCR_MEMORY_SERVICE_ENABLED=external ./deploy.sh
 ```
 
 The Guard needs a KVCR build that passes the pool to the worker as a file
-descriptor (ai-dynamo/kvcr#131), so workers mount only the socket directory. A
-Guard restart keeps the pool file but not its record index, so cached blocks are
-not reused across a Guard restart; they survive a worker or DGD recycle while the
-Guard stays up. The state agent needs a
+descriptor (ai-dynamo/kvcr#131), so workers mount only the socket directory.
+Cached blocks survive a worker or DGD recycle while the Guard stays up. A
+restarted Guard creates a new pool and reclaims the old one once no worker holds
+it, so cached blocks are not reused across a Guard restart. The state agent needs a
 persistent ServiceAccount and Role for Dynamo's Kubernetes discovery:
 `create,get,list,watch,update,patch,delete` on `dynamoworkermetadatas.nvidia.com`
 and `get,list,watch` on pods, endpoints and endpointslices. Do not use the

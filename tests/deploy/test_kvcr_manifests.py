@@ -350,7 +350,7 @@ def test_guard_daemonset_and_worker_share_the_node_contract() -> None:
     assert "--adopt-pools" not in guard["command"]
     for spec in (guard_spec, worker_spec):
         assert spec["hostNetwork"] is True
-        assert spec["securityContext"]["runAsUser"] == 2000
+        assert spec["securityContext"]["runAsUser"] == 1000
     assert guard_spec["initContainers"][0]["securityContext"]["runAsUser"] == 0
 
     def host_paths(spec: dict) -> dict:
