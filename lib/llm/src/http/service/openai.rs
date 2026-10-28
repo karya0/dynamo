@@ -7467,6 +7467,7 @@ mod tests {
     async fn lifecycle_disabled_spawn_preserves_http_parent() {
         use tracing::instrument::WithSubscriber;
 
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let subscriber = tracing_subscriber::registry();
         async {
             let http = tracing::info_span!("http-request");
@@ -7544,6 +7545,7 @@ mod tests {
         use tracing_subscriber::prelude::*;
 
         let capture = LifecycleOutcomeCapture::default();
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let subscriber = tracing_subscriber::registry().with(capture.clone());
         tracing::subscriber::with_default(subscriber, || {
             let request = LifecycleTrace::new(true).start_request();
@@ -7567,6 +7569,7 @@ mod tests {
             (ErrorType::Internal, "failed"),
         ] {
             let capture = LifecycleOutcomeCapture::default();
+            let _interest_guard = crate::test_utils::tracing_interest_guard();
             let subscriber = tracing_subscriber::registry().with(capture.clone());
             async {
                 let request = LifecycleTrace::new(true).start_request();
@@ -7605,6 +7608,7 @@ mod tests {
         use tracing_subscriber::prelude::*;
 
         let capture = LifecycleOutcomeCapture::default();
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let subscriber = tracing_subscriber::registry().with(capture.clone());
         async {
             let request = LifecycleTrace::new(true).start_request();
@@ -7667,6 +7671,7 @@ mod tests {
             (ErrorClass::DeadlineExceeded, true, true, "timed_out"),
         ] {
             let capture = LifecycleOutcomeCapture::default();
+            let _interest_guard = crate::test_utils::tracing_interest_guard();
             let subscriber = tracing_subscriber::registry().with(capture.clone());
             async {
                 let request = LifecycleTrace::new(true).start_request();
@@ -7714,6 +7719,7 @@ mod tests {
         use tracing_subscriber::prelude::*;
 
         let capture = LifecycleOutcomeCapture::default();
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let subscriber = tracing_subscriber::registry().with(capture.clone());
         async {
             let request = LifecycleTrace::new(true).start_request();
