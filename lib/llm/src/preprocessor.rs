@@ -10035,7 +10035,10 @@ mod tests {
                         description: None,
                         parameters: None,
                         strict: None,
+                        defer_loading: None,
                     },
+                    custom: None,
+                    defer_loading: None,
                 }])
                 .tool_choice(tool_choice)
                 .build()
