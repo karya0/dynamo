@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -185,7 +186,9 @@ def test_requires_a_linker_reported_hint_source():
 
 @pytest.mark.asyncio
 async def test_lifecycle_starts_one_owner_and_closes_once(monkeypatch):
-    owner = SimpleNamespace(start=AsyncMock(), close=AsyncMock())
+    owner = SimpleNamespace(
+        start=AsyncMock(), await_attached=AsyncMock(), close=AsyncMock()
+    )
     factory = Mock(return_value=owner)
     monkeypatch.setattr("dynamo.sglang.state_agent.KvStateAttachmentOwner", factory)
     endpoint = Mock()
@@ -197,6 +200,51 @@ async def test_lifecycle_starts_one_owner_and_closes_once(monkeypatch):
     )
     owner.start.assert_awaited_once()
     await lifecycle.close()
+    await lifecycle.close()
+    owner.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_start_waits_for_the_attach_ack(monkeypatch):
+    ack = asyncio.Event()
+
+    async def await_attached():
+        await ack.wait()
+
+    owner = SimpleNamespace(
+        start=AsyncMock(), await_attached=await_attached, close=AsyncMock()
+    )
+    monkeypatch.setattr(
+        "dynamo.sglang.state_agent.KvStateAttachmentOwner", lambda *args: owner
+    )
+    lifecycle = StateAgentLifecycle()
+    endpoint = Mock()
+    endpoint.connection_id.return_value = 123
+    task = asyncio.create_task(lifecycle.start(_engine(), _config(OWNER), endpoint))
+    await asyncio.sleep(0.05)
+    owner.start.assert_awaited_once()
+    assert not task.done()
+    ack.set()
+    await asyncio.wait_for(task, timeout=1)
+    await lifecycle.close()
+    owner.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_start_raises_on_attach_timeout_and_withdraws(monkeypatch):
+    owner = SimpleNamespace(
+        start=AsyncMock(),
+        await_attached=AsyncMock(side_effect=RuntimeError("did not acknowledge")),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "dynamo.sglang.state_agent.KvStateAttachmentOwner", lambda *args: owner
+    )
+    lifecycle = StateAgentLifecycle()
+    endpoint = Mock()
+    endpoint.connection_id.return_value = 123
+    with pytest.raises(RuntimeError, match="did not acknowledge"):
+        await lifecycle.start(_engine(), _config(OWNER), endpoint)
     await lifecycle.close()
     owner.close.assert_awaited_once()
 

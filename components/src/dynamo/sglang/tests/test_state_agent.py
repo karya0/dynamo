@@ -148,7 +148,9 @@ async def test_cleanup_timeout_preserves_body_exception(
 ):
     engine, config, _, _ = fixture()
     owner = SimpleNamespace(
-        start=AsyncMock(), close=AsyncMock(side_effect=asyncio.Event().wait)
+        start=AsyncMock(),
+        await_attached=AsyncMock(),
+        close=AsyncMock(side_effect=asyncio.Event().wait),
     )
     monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", lambda *args: owner)
     monkeypatch.setattr(kv_state_agent, "_STATE_AGENT_CLOSE_TIMEOUT_SECS", 0.01)
@@ -183,7 +185,9 @@ async def test_cancelled_start_cleanup_timeout_preserves_withdrawal(
     async def close():
         assert native_result.done() and not native_result.cancelled()
 
-    owner = SimpleNamespace(start=start, close=AsyncMock(side_effect=close))
+    owner = SimpleNamespace(
+        start=start, await_attached=AsyncMock(), close=AsyncMock(side_effect=close)
+    )
     monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", lambda *args: owner)
     monkeypatch.setattr(kv_state_agent, "_STATE_AGENT_CLOSE_TIMEOUT_SECS", 0.01)
     lifecycle = StateAgentLifecycle()
@@ -221,7 +225,9 @@ def test_cancelled_start_withdraws_registered_owner(monkeypatch, native_finished
         async def close():
             assert native_result.done() and not native_result.cancelled()
 
-        owner = SimpleNamespace(start=start, close=AsyncMock(side_effect=close))
+        owner = SimpleNamespace(
+        start=start, await_attached=AsyncMock(), close=AsyncMock(side_effect=close)
+    )
         monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", lambda *args: owner)
         lifecycle = StateAgentLifecycle()
         endpoint = SimpleNamespace(connection_id=lambda: 17)
