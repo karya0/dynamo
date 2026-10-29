@@ -2508,10 +2508,34 @@ version = "1.7.0"
 [[package]]
 name = "dynamo-global-frontend"
 version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "axum 0.8.4",
+ "clap",
+ "dynamo-global-common",
+ "dynamo-global-router",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "futures",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tracing",
+ "url",
+]
 
 [[package]]
 name = "dynamo-global-router"
 version = "1.7.0"
+dependencies = [
+ "dashmap",
+ "dynamo-global-common",
+ "parking_lot",
+ "url",
+]
 
 [[package]]
 name = "dynamo-global-view-broadcaster"
