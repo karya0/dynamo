@@ -157,6 +157,8 @@ spec:
             }))
             PY
             )
+            # Wait for the node's Guard socket instead of crash-looping before it exists.
+            for _ in $(seq 300); do [ -S /host-shm/kvcr-qwen3-0-6b.sock ] && break; sleep 1; done
             ulimit -l unlimited || true
             exec python3 -m dynamo.vllm \
               --model Qwen/Qwen3-0.6B \
