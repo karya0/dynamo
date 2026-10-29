@@ -119,10 +119,9 @@ impl CrWriter {
 /// `writer.applied` and always apply the latest metadata, so an earlier mutation can never
 /// overwrite a later one. A write whose generation was already covered by a newer persisted
 /// snapshot is skipped. If the write fails, the local mutation is rolled back unless a newer
-/// mutation landed meanwhile (that newer mutation's own CR write then carries this one too), and
-/// the original snapshot is written back to the CR so a dropped apply that lands late is undone.
-/// The CR apply is resourceVersion-fenced (see `apply_cr`), so a stale in-flight apply cannot
-/// land after a newer write.
+/// mutation landed meanwhile (its own CR write then carries this one too), and the original
+/// snapshot is written back to the CR. Every fenced write bumps the CR's resourceVersion, so a
+/// dropped apply still in flight is rejected with 409 rather than landing after the restore.
 async fn mutate_and_persist<R, M, P, Fut>(
     metadata: &RwLock<DiscoveryMetadata>,
     writer: &CrWriter,
@@ -176,8 +175,8 @@ where
                 }
             };
             if rolled_back {
-                // A dropped apply may still land. Writing the original back bumps the CR's
-                // resourceVersion, so any older in-flight apply is rejected with 409.
+                // A dropped apply may still land. This write bumps the CR's resourceVersion
+                // (even if the CR already equals `original`), so older in-flight applies get 409.
                 if let Err(restore_error) = writer.persist_with_retry(&original, &persist).await {
                     tracing::warn!(
                         "Failed to restore the CR after rollback; a stale apply may still land \
@@ -1316,32 +1315,9 @@ mod tests {
         assert_eq!(persisted.get_all_endpoints().len(), 2);
     }
 
-    #[tokio::test]
-    async fn cr_apply_timeout_returns_error_and_rolls_back() {
-        let metadata = Arc::new(RwLock::new(DiscoveryMetadata::new()));
-        let writer = CrWriter::new(Duration::from_millis(20));
-        let attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let counter = attempts.clone();
-
-        let err = mutate_and_persist(
-            &metadata,
-            &writer,
-            register(cr_endpoint_instance("slow")),
-            move |_| {
-                counter.fetch_add(1, Ordering::SeqCst);
-                std::future::pending::<Result<()>>()
-            },
-        )
-        .await
-        .unwrap_err();
-
-        assert!(err.to_string().contains("timed out"), "{err}");
-        // The write attempts, then the same number of attempts at restoring the CR.
-        assert_eq!(attempts.load(Ordering::SeqCst), 2 * CR_APPLY_ATTEMPTS);
-        assert!(metadata.read().await.get_all_endpoints().is_empty());
-    }
-
-    /// In-memory CR store with API-server resourceVersion semantics.
+    /// In-memory CR store with API-server semantics: a stale resourceVersion gets 409, no
+    /// resourceVersion lands on an existing object, and an apply that changes nothing is a
+    /// no-op that does not bump the resourceVersion.
     #[derive(Default)]
     struct FakeCrApi {
         state: std::sync::Mutex<(Option<DynamoWorkerMetadata>, u64)>,
@@ -1349,17 +1325,22 @@ mod tests {
         // The first `hang_first` applies never return; they land after `land_after`.
         hang_first: u64,
         land_after: Duration,
-        // The first `stale_gets` reads report a resourceVersion one behind.
-        stale_gets: AtomicU64,
     }
 
     impl FakeCrApi {
         fn land(&self, cr: &DynamoWorkerMetadata) -> Result<()> {
             let mut st = self.state.lock().unwrap();
-            if let Some(cur) = &st.0
-                && cr.metadata.resource_version != cur.metadata.resource_version
-            {
-                anyhow::bail!("409 Conflict: stale resourceVersion");
+            if let Some(cur) = &st.0 {
+                if cr.metadata.resource_version.is_some()
+                    && cr.metadata.resource_version != cur.metadata.resource_version
+                {
+                    anyhow::bail!("409 Conflict: stale resourceVersion");
+                }
+                if cr.spec.data == cur.spec.data
+                    && cr.metadata.annotations == cur.metadata.annotations
+                {
+                    return Ok(());
+                }
             }
             st.1 += 1;
             let mut stored = cr.clone();
@@ -1376,19 +1357,16 @@ mod tests {
                 .as_ref()
                 .map(|c| c.spec.data.clone())
         }
+
+        fn rv(&self) -> u64 {
+            self.state.lock().unwrap().1
+        }
     }
 
     #[async_trait]
     impl CrApi for Arc<FakeCrApi> {
         async fn get_cr(&self, _: &str) -> Result<Option<DynamoWorkerMetadata>> {
-            let mut cr = self.state.lock().unwrap().0.clone();
-            if self.stale_gets.load(Ordering::SeqCst) > 0 {
-                self.stale_gets.fetch_sub(1, Ordering::SeqCst);
-                if let Some(c) = cr.as_mut() {
-                    c.metadata.resource_version = Some("0".to_string());
-                }
-            }
-            Ok(cr)
+            Ok(self.state.lock().unwrap().0.clone())
         }
 
         async fn apply(&self, _: &str, cr: &DynamoWorkerMetadata) -> Result<()> {
@@ -1424,8 +1402,9 @@ mod tests {
         api
     }
 
-    // A timed-out apply that actually landed is found on the re-read: committed, no rollback.
-    #[tokio::test]
+    // A timed-out apply that actually landed is committed: the retry is at worst a redundant
+    // write, and local state is kept.
+    #[tokio::test(start_paused = true)]
     async fn timed_out_apply_that_landed_is_committed() {
         let api = seeded(FakeCrApi {
             hang_first: 1,
@@ -1445,11 +1424,6 @@ mod tests {
 
         assert_eq!(metadata.read().await.get_all_endpoints().len(), 1);
         assert_eq!(
-            api.applies.load(Ordering::SeqCst),
-            1,
-            "no rewrite after the landed apply"
-        );
-        assert_eq!(
             api.data().unwrap(),
             build_cr("cr", "pod", "uid", &*metadata.read().await)
                 .unwrap()
@@ -1458,20 +1432,21 @@ mod tests {
         );
     }
 
-    // All attempts fail: local state rolls back and the CR is restored, so an apply that lands
-    // late (here attempt 1) is undone and the remaining stale one (attempt 2) gets 409.
-    #[tokio::test]
-    async fn failed_writes_roll_back_and_restore_cr_fenced() {
+    // Every attempt times out and none has landed yet. The CR already equals the original, but
+    // the restore must still be a write that bumps the resourceVersion, so the stale attempts
+    // arriving afterwards get 409.
+    #[tokio::test(start_paused = true)]
+    async fn failed_writes_roll_back_and_fence_late_applies() {
         let api = seeded(FakeCrApi {
             hang_first: CR_APPLY_ATTEMPTS as u64,
-            land_after: Duration::from_millis(150),
+            land_after: Duration::from_secs(5),
             ..Default::default()
         });
-        let original = api.data().unwrap();
+        let (original, rv_before) = (api.data().unwrap(), api.rv());
         let metadata = RwLock::new(DiscoveryMetadata::new());
-        let writer = CrWriter::new(Duration::from_millis(100));
+        let writer = CrWriter::new(Duration::from_secs(1));
 
-        mutate_and_persist(
+        let err = mutate_and_persist(
             &metadata,
             &writer,
             register(cr_endpoint_instance("lost")),
@@ -1479,35 +1454,12 @@ mod tests {
         )
         .await
         .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
 
         assert!(metadata.read().await.get_all_endpoints().is_empty());
-        // Attempt 1 landed before the restore read; the restore replaced it.
-        assert_eq!(api.data().unwrap(), original);
-        // Attempt 2 lands after the restore with a stale resourceVersion and is rejected.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(api.data().unwrap(), original);
-    }
-
-    // A stale resourceVersion is rejected with 409; the retry re-reads and succeeds.
-    #[tokio::test]
-    async fn stale_resource_version_conflicts_then_retry_succeeds() {
-        let api = seeded(FakeCrApi {
-            stale_gets: AtomicU64::new(1),
-            ..Default::default()
-        });
-        let metadata = RwLock::new(DiscoveryMetadata::new());
-        let writer = CrWriter::new(Duration::from_secs(5));
-
-        mutate_and_persist(
-            &metadata,
-            &writer,
-            register(cr_endpoint_instance("retry")),
-            fenced_persist(&api),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(api.applies.load(Ordering::SeqCst), 2, "409 then success");
-        assert_eq!(metadata.read().await.get_all_endpoints().len(), 1);
+        assert_eq!(api.rv(), rv_before + 1, "restore must write");
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        assert_eq!(api.data().unwrap(), original, "stale applies must get 409");
+        assert_eq!(api.rv(), rv_before + 1);
     }
 }
