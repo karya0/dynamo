@@ -401,7 +401,14 @@ class DynamoSglangPublisher:
             # The versioned state agent consumes the mixed framework/KVCR
             # stream. The legacy normalizer rejects independently owned events.
             return []
-        if self.dynamo_args.use_kv_events and not publishes_kv_events(self.server_args):
+        if getattr(self.dynamo_args, "kvcr_state_agent_owner", None) is not None:
+            # The direct-linker state agent consumes the raw stream; legacy
+            # normalization rejects KVCR-owned residency events. Keep
+            # use_kv_events advertised.
+            pass
+        elif self.dynamo_args.use_kv_events and not publishes_kv_events(
+            self.server_args
+        ):
             logging.info(
                 "Non-leader node (node_rank=%s) shares the leader's single KV "
                 "rank slice; skipping KV event publishing so the router sees "
