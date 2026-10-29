@@ -27,7 +27,10 @@
 use std::time::Duration;
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex as StdMutex},
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use anyhow::{Context, Result};
@@ -1104,9 +1107,10 @@ impl KvStateAgent {
     /// Attach a new engine incarnation after the prior attachment has fully detached.
     ///
     /// The API accepts a different WorkerId at the stable slot's global rank.
-    /// Publishing the attachment advertisement commits listener readiness: it
-    /// happens only after the raw event listener is established. Projection is
-    /// separately recovery-gated; do not add another readability phase.
+    /// `MarkReady` commits listener readiness: it happens only after the raw
+    /// event listener is established, and `attach` then tells the listener so
+    /// it can end on any later unready status. Projection is separately
+    /// recovery-gated; do not add another readability phase.
     pub async fn attach(
         &self,
         config: KvStateAgentAttachmentConfig,
@@ -1170,7 +1174,10 @@ impl KvStateAgent {
         };
 
         let attachment = match mark_ready(&self.control_tx, attachment.generation).await {
-            Ok(attachment) => attachment,
+            Ok(attachment) => {
+                listener.commit();
+                attachment
+            }
             Err(error) => {
                 if let Err(rollback_error) =
                     rollback_started_attach(&self.control_tx, listener, attachment.generation).await
@@ -1619,9 +1626,16 @@ fn event_block_count(events: &[PlacementEvent]) -> usize {
 struct VllmListener {
     cancel: CancellationToken,
     handle: tokio::task::JoinHandle<()>,
+    /// Set by `attach` once `MarkReady` succeeded; from then on an unready
+    /// status ends the listener.
+    committed: Arc<AtomicBool>,
 }
 
 impl VllmListener {
+    fn commit(&self) {
+        self.committed.store(true, Ordering::Release);
+    }
+
     async fn stop(self) {
         self.cancel.cancel();
         let mut handle = self.handle;
@@ -1662,6 +1676,8 @@ async fn start_vllm_listener(
     };
     let listener_cancel = cancel.child_token();
     let task_cancel = listener_cancel.clone();
+    let committed = Arc::new(AtomicBool::new(false));
+    let task_committed = committed.clone();
     let handle = component.drt().runtime().secondary().spawn(async move {
         let result = run_vllm_listener(VllmListenerTask {
             source: &source,
@@ -1671,6 +1687,7 @@ async fn start_vllm_listener(
             ingress_tx,
             socket,
             status,
+            committed: task_committed,
             cancel: task_cancel.clone(),
         })
         .await;
@@ -1700,6 +1717,7 @@ async fn start_vllm_listener(
     Ok(VllmListener {
         cancel: listener_cancel,
         handle,
+        committed,
     })
 }
 
@@ -1711,6 +1729,7 @@ struct VllmListenerTask<'a> {
     ingress_tx: mpsc::UnboundedSender<IngressBatch>,
     socket: RawSubscription,
     status: Arc<KvStateAgentStatusCell>,
+    committed: Arc<AtomicBool>,
     cancel: CancellationToken,
 }
 
@@ -1749,6 +1768,7 @@ async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
         ingress_tx,
         mut socket,
         status,
+        committed,
         cancel,
     } = task;
     let mut framework_normalizer = ZmqEventNormalizer::new(kv_block_size)
@@ -1757,14 +1777,12 @@ async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
     let mut cache_owner_normalizer = ZmqEventNormalizer::new(kv_block_size)
         .with_image_token_id(source.image_token_id)
         .with_video_token_id(source.video_token_id);
-    // The listener starts before `MarkReady`; once ready, a later unready
-    // status (quarantine) ends it.
-    let mut was_ready = false;
+    // The listener starts before `MarkReady`; once `attach` commits it, a later
+    // unready status (quarantine or a coordinator-internal failure) ends it.
     loop {
         match status.load().attachment.as_ref() {
             Some(attachment) if attachment.generation == generation => {
-                was_ready |= attachment.ready;
-                if was_ready && !attachment.ready {
+                if committed.load(Ordering::Acquire) && !attachment.ready {
                     return Ok(());
                 }
             }
@@ -3236,5 +3254,73 @@ mod tests {
         assert!(!status.load().attachment.as_ref().unwrap().ready);
         coordinator.mark_ready(second.generation).unwrap();
         assert!(status.load().attachment.as_ref().unwrap().ready);
+    }
+
+    #[tokio::test]
+    async fn committed_listener_exits_when_coordinator_fails_source() {
+        use crate::utils::zmq::{bind_pub_socket, send_multipart};
+
+        let worker = WorkerWithDpRank::new(17, 3);
+        let (mut coordinator, status) = unattached_coordinator(3);
+        let mut attachment = test_attachment(worker, "tcp://framework");
+        coordinator.attach(&mut attachment).await.unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let endpoint = format!("ipc://{}", dir.path().join("events.sock").display());
+        let pub_socket = bind_pub_socket(&endpoint).await.unwrap();
+        let source = KvStateAgentVllmSource {
+            endpoint: endpoint.clone(),
+            topic: String::new(),
+            image_token_id: None,
+            video_token_id: None,
+            ingress_protocol: KvStateIngressProtocol::VllmResidencyV1,
+        };
+        let socket =
+            RawSubscription::Dedicated(connect_sub_socket(&endpoint, Some("")).await.unwrap());
+        let committed = Arc::new(AtomicBool::new(false));
+        let listener = run_vllm_listener(VllmListenerTask {
+            source: &source,
+            worker,
+            generation: attachment.generation,
+            kv_block_size: 4,
+            ingress_tx: mpsc::unbounded_channel().0,
+            socket,
+            status: status.clone(),
+            committed: committed.clone(),
+            cancel: CancellationToken::new(),
+        });
+        tokio::pin!(listener);
+
+        // The listener samples the unready attachment and blocks in `next`.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut listener)
+                .await
+                .is_err()
+        );
+
+        // `MarkReady` and the commit land, then the coordinator fails the source
+        // before the listener samples status again.
+        coordinator.mark_ready(attachment.generation).unwrap();
+        committed.store(true, Ordering::Release);
+        coordinator.fail_source(attachment.generation, "test source failure");
+        assert!(!status.load().attachment.as_ref().unwrap().ready);
+
+        // The next frame wakes the listener; it must observe the failure and end.
+        let payload = rmp_serde::to_vec_named(&(1.0f64, Vec::<()>::new(), Some(3i32))).unwrap();
+        let frames = vec![Vec::new(), 1u64.to_be_bytes().to_vec(), payload];
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut tick = tokio::time::interval(Duration::from_millis(50));
+            loop {
+                tokio::select! {
+                    result = &mut listener => return result,
+                    _ = tick.tick() => {
+                        send_multipart(&pub_socket, frames.clone()).await.unwrap();
+                    }
+                }
+            }
+        })
+        .await
+        .expect("committed listener kept running after the source failed");
+        result.unwrap();
     }
 }
