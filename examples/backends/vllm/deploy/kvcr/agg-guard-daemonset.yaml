@@ -121,6 +121,21 @@ spec:
   - name: worker
     podTemplate:
       spec:
+        # One worker per node: the node's Guard pool and host ports are per node.
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-component
+                  operator: In
+                  values:
+                  - worker
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - vllm-agg-kvcr-guard-daemonset
+              topologyKey: kubernetes.io/hostname
         dnsPolicy: ClusterFirstWithHostNet
         hostNetwork: true
         securityContext:

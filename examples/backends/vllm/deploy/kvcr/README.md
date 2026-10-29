@@ -143,14 +143,20 @@ the worker DGD, so the pool survives a worker restart. There is no state agent:
 the worker uses the normal KV event publisher and `--router-mode kv` routing.
 It needs a KVCR build that hands the pool to the worker as a file descriptor.
 
-Render with `envsubst`, apply the DaemonSet and wait for it to be Ready, then the
-DGD. Delete only the DGD to restart the worker against the same Guard.
+Render with an explicit variable list so the worker's shell variables survive:
+`envsubst '${DYNAMO_VLLM_IMAGE} ${DYNAMO_KVCR_COMPATIBILITY_DIGEST}
+${DYNAMO_RDMA_RESOURCE} ${DYNAMO_UCX_NET_DEVICES}'`. Apply the DaemonSet and
+wait for it to be Ready, then the DGD. Delete only the DGD to restart the worker
+against the same Guard.
 
-- Both Pods run as uid 1000; the Guard rejects a peer with another uid.
+- Both Pods run as uid 1000; the socket is mode 0600, so only that uid can
+  connect.
 - The Guard creates its 0600 socket in the node's `/dev/shm` (`hostPath`, type
   `Directory`); the worker mounts it read-only. The pool is an `emptyDir` in the
   Guard Pod only, and no init container or chown is needed.
 - Guard and worker use `hostNetwork` and the same socket path and digest.
 
-Known limit: one Guard pool per node. Two workers of the same model on a node
-would share it, so run one worker per node.
+Known limits: one Guard pool per node, so the worker uses required
+anti-affinity to run one per node. After a worker restart the router does not
+know about blocks the Guard kept until they are stored or touched again; the
+worker still reuses them on lookup.
