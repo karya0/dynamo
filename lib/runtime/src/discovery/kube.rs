@@ -85,7 +85,7 @@ impl CrWriter {
     async fn persist_with_retry<P, Fut>(
         &self,
         snapshot: &DiscoveryMetadata,
-        persist: &P,
+        persist: P,
     ) -> Result<()>
     where
         P: Fn(DiscoveryMetadata) -> Fut,
@@ -149,7 +149,7 @@ where
         (guard.clone(), writer.generation.load(Ordering::SeqCst))
     };
 
-    match writer.persist_with_retry(&snapshot, &persist).await {
+    match writer.persist_with_retry(&snapshot, persist).await {
         Ok(()) => {
             *applied = snapshot_generation;
             Ok(result)
@@ -753,6 +753,7 @@ mod tests {
             event_tx: broadcast::channel(1).0,
             daemon_state: watch::channel(DaemonState::Pending).1,
             kube_client: KubeClient::new(service, "default"),
+            cr_writer: Arc::new(CrWriter::from_env()),
             pod_info: PodInfo {
                 pod_name: "worker".into(),
                 pod_namespace: "default".into(),
@@ -818,6 +819,7 @@ mod tests {
             event_tx,
             daemon_state,
             kube_client,
+            cr_writer: Arc::new(CrWriter::from_env()),
             pod_info: PodInfo {
                 pod_name: "worker-a".to_string(),
                 pod_namespace: "ns".to_string(),
@@ -1148,7 +1150,7 @@ mod tests {
         );
     }
 
-    fn endpoint_instance(endpoint: &str) -> DiscoveryInstance {
+    fn cr_endpoint_instance(endpoint: &str) -> DiscoveryInstance {
         DiscoverySpec::Endpoint {
             namespace: "ns".to_string(),
             component: "comp".to_string(),
@@ -1180,7 +1182,7 @@ mod tests {
                 mutate_and_persist(
                     &metadata,
                     &writer,
-                    register(endpoint_instance("first")),
+                    register(cr_endpoint_instance("first")),
                     move |_| {
                         let stall = stall.clone();
                         async move {
@@ -1203,7 +1205,7 @@ mod tests {
                 mutate_and_persist(
                     &metadata,
                     &writer,
-                    register(endpoint_instance("second")),
+                    register(cr_endpoint_instance("second")),
                     |_| async { Ok(()) },
                 )
                 .await
@@ -1265,7 +1267,7 @@ mod tests {
                 mutate_and_persist(
                     &metadata,
                     &writer,
-                    register(endpoint_instance("a")),
+                    register(cr_endpoint_instance("a")),
                     persist,
                 )
                 .await
@@ -1279,7 +1281,7 @@ mod tests {
                 mutate_and_persist(
                     &metadata,
                     &writer,
-                    register(endpoint_instance("b")),
+                    register(cr_endpoint_instance("b")),
                     persist,
                 )
                 .await
@@ -1304,7 +1306,7 @@ mod tests {
         let err = mutate_and_persist(
             &metadata,
             &writer,
-            register(endpoint_instance("slow")),
+            register(cr_endpoint_instance("slow")),
             move |_| {
                 counter.fetch_add(1, Ordering::SeqCst);
                 std::future::pending::<Result<()>>()
