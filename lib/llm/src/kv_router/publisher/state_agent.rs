@@ -1779,20 +1779,31 @@ async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
         .with_video_token_id(source.video_token_id);
     // The listener starts before `MarkReady`; once `attach` commits it, a later
     // unready status (quarantine or a coordinator-internal failure) ends it.
-    loop {
+    // Status is checked again after each wake so no frame is forwarded once the
+    // attachment has failed. `committed` is loaded before `status`: a commit
+    // happens after `MarkReady` stored the ready status, so this order never
+    // pairs a fresh commit with a pre-ready snapshot.
+    let detached = || {
+        let committed = committed.load(Ordering::Acquire);
         match status.load().attachment.as_ref() {
             Some(attachment) if attachment.generation == generation => {
-                if committed.load(Ordering::Acquire) && !attachment.ready {
-                    return Ok(());
-                }
+                committed && !attachment.ready
             }
-            _ => return Ok(()),
+            _ => true,
+        }
+    };
+    loop {
+        if detached() {
+            return Ok(());
         }
         let frames = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Ok(()),
             frames = socket.next() => frames,
         };
+        if detached() {
+            return Ok(());
+        }
         let frames = match frames {
             Some(Ok(frames)) => frames,
             Some(Err(error)) => return Err(error).context("ZMQ receive failed"),
