@@ -85,7 +85,7 @@ impl CrWriter {
     async fn persist_with_retry<P, Fut>(
         &self,
         snapshot: &DiscoveryMetadata,
-        persist: P,
+        persist: &P,
     ) -> Result<()>
     where
         P: Fn(DiscoveryMetadata) -> Fut,
@@ -119,7 +119,10 @@ impl CrWriter {
 /// `writer.applied` and always apply the latest metadata, so an earlier mutation can never
 /// overwrite a later one. A write whose generation was already covered by a newer persisted
 /// snapshot is skipped. If the write fails, the local mutation is rolled back unless a newer
-/// mutation landed meanwhile; that newer mutation's own CR write then carries this one too.
+/// mutation landed meanwhile (that newer mutation's own CR write then carries this one too), and
+/// the original snapshot is written back to the CR so a dropped apply that lands late is undone.
+/// The CR apply is resourceVersion-fenced (see `apply_cr`), so a stale in-flight apply cannot
+/// land after a newer write.
 async fn mutate_and_persist<R, M, P, Fut>(
     metadata: &RwLock<DiscoveryMetadata>,
     writer: &CrWriter,
@@ -149,22 +152,38 @@ where
         (guard.clone(), writer.generation.load(Ordering::SeqCst))
     };
 
-    match writer.persist_with_retry(&snapshot, persist).await {
+    match writer.persist_with_retry(&snapshot, &persist).await {
         Ok(()) => {
             *applied = snapshot_generation;
             Ok(result)
         }
         Err(e) => {
-            drop(applied);
-            let mut guard = metadata.write().await;
-            if writer.generation.load(Ordering::SeqCst) == generation {
-                tracing::warn!("Failed to persist metadata to CR, rolling back local state: {e}");
-                *guard = original;
-            } else {
-                tracing::warn!(
-                    "Failed to persist metadata to CR; a newer local update exists and will be \
-                     persisted by its own write: {e}"
-                );
+            // Keep the CR write lock so the restore below cannot interleave with a newer write.
+            let rolled_back = {
+                let mut guard = metadata.write().await;
+                if writer.generation.load(Ordering::SeqCst) == generation {
+                    tracing::warn!(
+                        "Failed to persist metadata to CR, rolling back local state: {e}"
+                    );
+                    *guard = original.clone();
+                    true
+                } else {
+                    tracing::warn!(
+                        "Failed to persist metadata to CR; a newer local update exists and will \
+                         be persisted by its own write: {e}"
+                    );
+                    false
+                }
+            };
+            if rolled_back {
+                // A dropped apply may still land. Writing the original back bumps the CR's
+                // resourceVersion, so any older in-flight apply is rejected with 409.
+                if let Err(restore_error) = writer.persist_with_retry(&original, &persist).await {
+                    tracing::warn!(
+                        "Failed to restore the CR after rollback; a stale apply may still land \
+                         and leave the CR ahead of local state: {restore_error}"
+                    );
+                }
             }
             Err(e)
         }
@@ -179,7 +198,7 @@ async fn update_model_taints_and_persist<P, Fut>(
     persist: P,
 ) -> Result<bool>
 where
-    P: Fn(DiscoveryMetadata) -> Fut + Send + 'static,
+    P: Fn(DiscoveryMetadata) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<()>> + Send + 'static,
 {
     let metadata = Arc::clone(metadata);
@@ -320,7 +339,7 @@ impl KubeDiscoveryClient {
     /// Builds the persist function: renders a metadata snapshot into the CR and applies it.
     fn cr_persister(
         &self,
-    ) -> impl Fn(DiscoveryMetadata) -> BoxFuture<'static, Result<()>> + Send + 'static {
+    ) -> impl Fn(DiscoveryMetadata) -> BoxFuture<'static, Result<()>> + Send + Sync + 'static {
         let kube_client = self.kube_client.clone();
         let namespace = self.pod_info.pod_namespace.clone();
         let cr_name = self.pod_info.target.cr_name();
@@ -701,6 +720,7 @@ mod tests {
     use crate::component::TransportType;
     use crate::discovery::startup_contract as contract;
     use crate::discovery::{EventScope, EventTransport, ModelTaintsUpdate};
+    use crd::{CrApi, apply_cr_fenced};
 
     // Regression: suppressing NotFound reports healthy for a missing discovery
     // API, even though discovery cannot list or watch any workers.
@@ -1316,7 +1336,178 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("timed out"), "{err}");
-        assert_eq!(attempts.load(Ordering::SeqCst), CR_APPLY_ATTEMPTS);
+        // The write attempts, then the same number of attempts at restoring the CR.
+        assert_eq!(attempts.load(Ordering::SeqCst), 2 * CR_APPLY_ATTEMPTS);
         assert!(metadata.read().await.get_all_endpoints().is_empty());
+    }
+
+    /// In-memory CR store with API-server resourceVersion semantics.
+    #[derive(Default)]
+    struct FakeCrApi {
+        state: std::sync::Mutex<(Option<DynamoWorkerMetadata>, u64)>,
+        applies: AtomicU64,
+        // The first `hang_first` applies never return; they land after `land_after`.
+        hang_first: u64,
+        land_after: Duration,
+        // The first `stale_gets` reads report a resourceVersion one behind.
+        stale_gets: AtomicU64,
+    }
+
+    impl FakeCrApi {
+        fn land(&self, cr: &DynamoWorkerMetadata) -> Result<()> {
+            let mut st = self.state.lock().unwrap();
+            if let Some(cur) = &st.0
+                && cr.metadata.resource_version != cur.metadata.resource_version
+            {
+                anyhow::bail!("409 Conflict: stale resourceVersion");
+            }
+            st.1 += 1;
+            let mut stored = cr.clone();
+            stored.metadata.resource_version = Some(st.1.to_string());
+            st.0 = Some(stored);
+            Ok(())
+        }
+
+        fn data(&self) -> Option<serde_json::Value> {
+            self.state
+                .lock()
+                .unwrap()
+                .0
+                .as_ref()
+                .map(|c| c.spec.data.clone())
+        }
+    }
+
+    #[async_trait]
+    impl CrApi for Arc<FakeCrApi> {
+        async fn get_cr(&self, _: &str) -> Result<Option<DynamoWorkerMetadata>> {
+            let mut cr = self.state.lock().unwrap().0.clone();
+            if self.stale_gets.load(Ordering::SeqCst) > 0 {
+                self.stale_gets.fetch_sub(1, Ordering::SeqCst);
+                if let Some(c) = cr.as_mut() {
+                    c.metadata.resource_version = Some("0".to_string());
+                }
+            }
+            Ok(cr)
+        }
+
+        async fn apply(&self, _: &str, cr: &DynamoWorkerMetadata) -> Result<()> {
+            if self.applies.fetch_add(1, Ordering::SeqCst) < self.hang_first {
+                let (api, cr, delay) = (self.clone(), cr.clone(), self.land_after);
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    let _ = api.land(&cr);
+                });
+                return std::future::pending().await;
+            }
+            self.land(cr)
+        }
+    }
+
+    fn fenced_persist(
+        api: &Arc<FakeCrApi>,
+    ) -> impl Fn(DiscoveryMetadata) -> BoxFuture<'static, Result<()>> {
+        let api = api.clone();
+        move |snapshot| {
+            let api = api.clone();
+            Box::pin(async move {
+                let cr = build_cr("cr", "pod", "uid", &snapshot)?;
+                apply_cr_fenced(&api, &cr).await
+            })
+        }
+    }
+
+    fn seeded(api: FakeCrApi) -> Arc<FakeCrApi> {
+        let cr = build_cr("cr", "pod", "uid", &DiscoveryMetadata::new()).unwrap();
+        let api = Arc::new(api);
+        api.land(&cr).unwrap();
+        api
+    }
+
+    // A timed-out apply that actually landed is found on the re-read: committed, no rollback.
+    #[tokio::test]
+    async fn timed_out_apply_that_landed_is_committed() {
+        let api = seeded(FakeCrApi {
+            hang_first: 1,
+            ..Default::default()
+        });
+        let metadata = RwLock::new(DiscoveryMetadata::new());
+        let writer = CrWriter::new(Duration::from_millis(50));
+
+        mutate_and_persist(
+            &metadata,
+            &writer,
+            register(cr_endpoint_instance("landed")),
+            fenced_persist(&api),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(metadata.read().await.get_all_endpoints().len(), 1);
+        assert_eq!(
+            api.applies.load(Ordering::SeqCst),
+            1,
+            "no rewrite after the landed apply"
+        );
+        assert_eq!(
+            api.data().unwrap(),
+            build_cr("cr", "pod", "uid", &*metadata.read().await)
+                .unwrap()
+                .spec
+                .data
+        );
+    }
+
+    // All attempts fail: local state rolls back and the CR is restored, so an apply that lands
+    // late (here attempt 1) is undone and the remaining stale one (attempt 2) gets 409.
+    #[tokio::test]
+    async fn failed_writes_roll_back_and_restore_cr_fenced() {
+        let api = seeded(FakeCrApi {
+            hang_first: CR_APPLY_ATTEMPTS as u64,
+            land_after: Duration::from_millis(150),
+            ..Default::default()
+        });
+        let original = api.data().unwrap();
+        let metadata = RwLock::new(DiscoveryMetadata::new());
+        let writer = CrWriter::new(Duration::from_millis(100));
+
+        mutate_and_persist(
+            &metadata,
+            &writer,
+            register(cr_endpoint_instance("lost")),
+            fenced_persist(&api),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(metadata.read().await.get_all_endpoints().is_empty());
+        // Attempt 1 landed before the restore read; the restore replaced it.
+        assert_eq!(api.data().unwrap(), original);
+        // Attempt 2 lands after the restore with a stale resourceVersion and is rejected.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(api.data().unwrap(), original);
+    }
+
+    // A stale resourceVersion is rejected with 409; the retry re-reads and succeeds.
+    #[tokio::test]
+    async fn stale_resource_version_conflicts_then_retry_succeeds() {
+        let api = seeded(FakeCrApi {
+            stale_gets: AtomicU64::new(1),
+            ..Default::default()
+        });
+        let metadata = RwLock::new(DiscoveryMetadata::new());
+        let writer = CrWriter::new(Duration::from_secs(5));
+
+        mutate_and_persist(
+            &metadata,
+            &writer,
+            register(cr_endpoint_instance("retry")),
+            fenced_persist(&api),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(api.applies.load(Ordering::SeqCst), 2, "409 then success");
+        assert_eq!(metadata.read().await.get_all_endpoints().len(), 1);
     }
 }
