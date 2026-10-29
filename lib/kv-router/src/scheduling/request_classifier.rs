@@ -28,7 +28,7 @@ use crate::plugins::request_classifier::{RequestProgress, RequestProgressUpdater
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
 pub use crate::plugins::request_classifier::{
     AbortCause, ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
-    RequestClassifierContext, RequestClassifierWorker,
+    RequestClassifierContext,
 };
 
 /// One live lifecycle's bookkeeping. `generation` fences `classify_with`
@@ -187,7 +187,7 @@ impl RequestClassifierRuntime {
                 KvSchedulerError::ClassificationLifecycleEnded(request_id.to_owned())
             })?;
             live.progress_updater
-                .update_context_tokens(request.input_tokens());
+                .update_context_tokens(request.isl_tokens());
             request.progress = live.progress.clone();
             if let Some(overrides) = live.overrides.clone() {
                 request.overrides = overrides;
@@ -965,8 +965,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(calls.load(Ordering::Relaxed), 1);
-        assert_eq!(first.input_tokens(), 10);
-        assert_eq!(retry.input_tokens(), 20);
+        assert_eq!(first.isl_tokens(), 10);
+        assert_eq!(retry.isl_tokens(), 20);
         assert_eq!(retry.scheduling_cost_tokens(), 7);
         assert_eq!(retry.progress().context_tokens(), 25);
         assert_eq!(
@@ -1136,7 +1136,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(replacement.input_tokens(), 100);
+        assert_eq!(replacement.isl_tokens(), 100);
         assert_eq!(replacement.scheduling_cost_tokens(), 7);
         assert_eq!(calls.load(Ordering::Relaxed), 1);
     }

@@ -376,7 +376,7 @@ Routing cache resources start only if a component requests `CACHE` or a scorer r
 
 | Accessor | Meaning |
 |---|---|
-| `prompt_tokens()` | Exact incoming prompt token count; zero when the request has no token IDs, such as embeddings-only input |
+| `isl_tokens()` | Input sequence length in tokens, the same value a request classifier reads; zero when the request has no token IDs, such as embeddings-only input |
 | `request_blocks()` | Incoming prompt size in KV blocks, rounded up |
 | `block_size()` | Tokens in one KV block |
 | `tracks_prefill_tokens()` | Whether the request contributes to prefill-load tracking |

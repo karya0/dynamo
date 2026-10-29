@@ -7,7 +7,7 @@ mod config;
 mod inputs;
 mod progress;
 mod registry;
-pub use inputs::{RequestClassifierContext, RequestClassifierWorker};
+pub use inputs::RequestClassifierContext;
 pub use progress::{RequestProgress, RequestProgressUpdater};
 
 pub(crate) use config::RawRequestClassifierConfig;
@@ -180,7 +180,8 @@ impl ClassifyRequest {
         self.overrides.policy_class = Some(policy_class.into());
     }
 
-    pub fn input_tokens(&self) -> usize {
+    /// Input sequence length in tokens, the size the scheduler uses.
+    pub fn isl_tokens(&self) -> usize {
         self.input_tokens
     }
 

@@ -80,7 +80,7 @@ impl RequestClassifier for LegacyClassifier {
         _workers: WorkerCandidates<'_>,
     ) -> ClassifyFuture {
         let _: Option<&str> = request.request_id();
-        let _: usize = request.input_tokens();
+        let _: usize = request.isl_tokens();
         let _: Option<&[u64]> = request.sequence_hashes();
         let _: &dynamo_kv_router::scheduling::RequestProgress = request.progress();
         let _: &request_classifier::RequestProgress = request.progress();

@@ -2458,7 +2458,7 @@ impl RequestClassifier for TokenContractClassifier {
         _workers: WorkerCandidates<'_>,
     ) -> ClassifyFuture {
         self.classified
-            .send((request.input_tokens(), request.progress().clone()))
+            .send((request.isl_tokens(), request.progress().clone()))
             .unwrap();
         Box::pin(async move { Ok(request) })
     }
