@@ -184,12 +184,16 @@ impl CrApi for Api<DynamoWorkerMetadata> {
     }
 }
 
+/// Annotation set to a fresh value on every write, so each apply changes the object.
+const WRITE_ID_ANNOTATION: &str = "nvidia.com/dynamo-discovery-write-id";
+
 /// Apply a DynamoWorkerMetadata CR, fenced by the CR's current resourceVersion.
 ///
-/// Reads the CR first. If it already holds `cr`'s spec (an earlier, timed-out apply landed)
-/// nothing is written. Otherwise the apply carries the resourceVersion just read, so a request
-/// still in flight from an older attempt is rejected with 409 instead of landing after a newer
-/// write. A missing CR is created without a resourceVersion.
+/// The apply carries the resourceVersion just read, so a request still in flight from an older
+/// attempt is rejected with 409 instead of landing after a newer write. The API server skips
+/// the etcd write (and the resourceVersion bump) for an apply that changes nothing, so every
+/// write also stamps a fresh `WRITE_ID_ANNOTATION`. A missing CR is created without a
+/// resourceVersion.
 pub(super) async fn apply_cr_fenced<A: CrApi>(api: &A, cr: &DynamoWorkerMetadata) -> Result<()> {
     let cr_name = cr
         .metadata
@@ -200,10 +204,11 @@ pub(super) async fn apply_cr_fenced<A: CrApi>(api: &A, cr: &DynamoWorkerMetadata
         |e: anyhow::Error| anyhow::anyhow!("Failed to apply DynamoWorkerMetadata {cr_name}: {e}");
 
     let mut cr = cr.clone();
+    cr.metadata.annotations.get_or_insert_default().insert(
+        WRITE_ID_ANNOTATION.to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    );
     if let Some(current) = api.get_cr(cr_name).await.map_err(wrap)? {
-        if current.spec.data == cr.spec.data {
-            return Ok(());
-        }
         cr.metadata.resource_version = current.metadata.resource_version;
     }
     api.apply(cr_name, &cr).await.map_err(wrap)
