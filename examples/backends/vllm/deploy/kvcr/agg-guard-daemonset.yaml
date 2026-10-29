@@ -1,0 +1,220 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# One KVCR Guard per GPU node in its own DaemonSet Pod, outside the DGD, so its pool
+# outlives the worker. Render with envsubst, apply the DaemonSet first, then the DGD.
+# Needs a KVCR build that passes the pool to the worker as a file descriptor, and no
+# state agent: the worker publishes KV events through the normal KV event publisher.
+#
+# Both Pods run as uid 1000. The Guard creates its socket (mode 0600) directly in the
+# node's /dev/shm, an existing 1777 directory, and checks the peer uid, so no init
+# container or chown is needed. The pool is an emptyDir private to the Guard Pod; the
+# worker mounts /dev/shm read-only only to reach the socket and receives the pool by
+# fd. hostNetwork: the Guard binds the control address the worker advertises.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kvcr-qwen3-0-6b-guard
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kvcr-qwen3-0-6b-guard
+  updateStrategy:
+    type: OnDelete
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kvcr-qwen3-0-6b-guard
+    spec:
+      dnsPolicy: ClusterFirstWithHostNet
+      hostNetwork: true
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      tolerations:
+      - effect: NoSchedule
+        key: nvidia.com/gpu
+        operator: Exists
+      securityContext:
+        runAsGroup: 1000
+        runAsUser: 1000
+      containers:
+      - name: kvcr-service
+        image: ${DYNAMO_VLLM_IMAGE}
+        command:
+        - kvcr-service
+        - --socket-path
+        - /host-shm/kvcr-qwen3-0-6b.sock
+        - --pool-dir
+        - /pool
+        - --guard-count
+        - "1"
+        - --pool-sizes-gb
+        - "2"
+        - --compatibility-digest
+        - ${DYNAMO_KVCR_COMPATIBILITY_DIGEST}
+        env:
+        - name: UCX_TLS
+          value: rc_x,cuda
+        - name: UCX_NET_DEVICES
+          value: ${DYNAMO_UCX_NET_DEVICES}
+        resources:
+          limits:
+            ${DYNAMO_RDMA_RESOURCE}: "1"
+            memory: 4Gi
+          requests:
+            ${DYNAMO_RDMA_RESOURCE}: "1"
+            cpu: "1"
+            memory: 3Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+            add:
+            - IPC_LOCK
+        readinessProbe:
+          exec:
+            command:
+            - python3
+            - -c
+            - import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(1); s.connect('/host-shm/kvcr-qwen3-0-6b.sock'); s.close()
+          failureThreshold: 3
+          periodSeconds: 5
+          timeoutSeconds: 4
+        volumeMounts:
+        - mountPath: /host-shm
+          name: host-shm
+        - mountPath: /pool
+          name: kvcr-pool
+      volumes:
+      - hostPath:
+          path: /dev/shm
+          type: Directory
+        name: host-shm
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 3Gi
+        name: kvcr-pool
+---
+# Worker for the Guard above. The socket path and uid 1000 must match the Guard. One
+# worker per node is enough: it attaches to that node's Guard through /host-shm.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  annotations:
+    nvidia.com/dynamo-discovery-backend: kubernetes
+    nvidia.com/dynamo-kube-discovery-mode: container
+  name: vllm-agg-kvcr-guard-daemonset
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+          image: ${DYNAMO_VLLM_IMAGE}
+          name: main
+    replicas: 1
+    type: frontend
+  - name: worker
+    podTemplate:
+      spec:
+        dnsPolicy: ClusterFirstWithHostNet
+        hostNetwork: true
+        securityContext:
+          runAsGroup: 1000
+          runAsUser: 1000
+        containers:
+        - args:
+          - |
+            set -euo pipefail
+
+            kv_transfer_config=$(
+              python3 - <<'PY'
+            import json
+            import os
+
+            print(json.dumps({
+                "kv_connector": "OffloadingConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {
+                    "cpu_bytes_to_use": 2147483648,
+                    "spec_name": "TieringOffloadingSpec",
+                    "self_describing_kv_events": True,
+                    "secondary_tiers": [{
+                        "type": "kvcr",
+                        "kvcr_service_socket_path": "/host-shm/kvcr-qwen3-0-6b.sock",
+                        "compatibility_digest": "${DYNAMO_KVCR_COMPATIBILITY_DIGEST}",
+                        "router_capabilities": ["router_hint"],
+                        "control_host": "0.0.0.0",
+                        "control_ports": [23280],
+                        "control_advertise_host": os.environ["POD_IP"],
+                        "enable_telemetry": True,
+                    }],
+                },
+            }))
+            PY
+            )
+            ulimit -l unlimited || true
+            exec python3 -m dynamo.vllm \
+              --model Qwen/Qwen3-0.6B \
+              --kv-transfer-config "$kv_transfer_config" \
+              --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:23080","enable_kv_cache_events":true}'
+          command:
+          - /bin/bash
+          - -c
+          env:
+          - name: CONTAINER_NAME
+            value: main
+          - name: DYN_KUBE_DISCOVERY_MODE
+            value: container
+          - name: DYN_SYSTEM_PORT
+            value: "9090"
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          - name: PYTHONHASHSEED
+            value: "0"
+          - name: UCX_TLS
+            value: rc_x,cuda
+          - name: UCX_NET_DEVICES
+            value: ${DYNAMO_UCX_NET_DEVICES}
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: ${DYNAMO_VLLM_IMAGE}
+          name: main
+          resources:
+            limits:
+              ${DYNAMO_RDMA_RESOURCE}: "1"
+              nvidia.com/gpu: "1"
+            requests:
+              ${DYNAMO_RDMA_RESOURCE}: "1"
+              ephemeral-storage: 2Gi
+              nvidia.com/gpu: "1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+              add:
+              - IPC_LOCK
+          volumeMounts:
+          - mountPath: /host-shm
+            name: host-shm
+            readOnly: true
+          workingDir: /workspace/examples/backends/vllm
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+        volumes:
+        - hostPath:
+            path: /dev/shm
+            type: Directory
+          name: host-shm
+    replicas: 1
+    type: worker

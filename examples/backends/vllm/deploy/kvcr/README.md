@@ -135,3 +135,22 @@ separate hosts, one source engine restarts while its KVCR sidecar remains up,
 the Guard serves the preserved cache to the other engine, the response matches,
 the KVCR transfer metrics increase, and the selected active HCA carries the
 transfer.
+
+## Guard in its own per-node Pod
+
+`agg-guard-daemonset.yaml` runs the KVCR Guard as a DaemonSet Pod, separate from
+the worker DGD, so the pool survives a worker restart. There is no state agent:
+the worker uses the normal KV event publisher and `--router-mode kv` routing.
+It needs a KVCR build that hands the pool to the worker as a file descriptor.
+
+Render with `envsubst`, apply the DaemonSet and wait for it to be Ready, then the
+DGD. Delete only the DGD to restart the worker against the same Guard.
+
+- Both Pods run as uid 1000; the Guard rejects a peer with another uid.
+- The Guard creates its 0600 socket in the node's `/dev/shm` (`hostPath`, type
+  `Directory`); the worker mounts it read-only. The pool is an `emptyDir` in the
+  Guard Pod only, and no init container or chown is needed.
+- Guard and worker use `hostNetwork` and the same socket path and digest.
+
+Known limit: one Guard pool per node. Two workers of the same model on a node
+would share it, so run one worker per node.
