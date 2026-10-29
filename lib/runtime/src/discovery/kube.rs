@@ -12,6 +12,7 @@ pub use utils::{hash_container_name, hash_pod_name};
 
 use crd::{apply_cr, build_cr};
 use daemon::{DaemonOutputs, DaemonState, DiscoveryDaemon, ListState};
+use futures::future::BoxFuture;
 use utils::{KubeDiscoveryMode, PodInfo};
 
 use crate::CancellationToken;
@@ -29,7 +30,9 @@ use kube::{
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
-use tokio::sync::{RwLock, broadcast, watch};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+use tokio::sync::{Mutex, RwLock, broadcast, watch};
 
 fn validate_kubernetes_publisher_id(publisher_id: u64) -> Result<()> {
     if publisher_id > MAX_JSON_SAFE_PUBLISHER_ID {
@@ -42,30 +45,158 @@ fn validate_kubernetes_publisher_id(publisher_id: u64) -> Result<()> {
     Ok(())
 }
 
-async fn update_model_taints_and_persist<F, Fut>(
+/// Default bound on a single DynamoWorkerMetadata CR apply.
+const DEFAULT_CR_APPLY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Environment variable overriding [`DEFAULT_CR_APPLY_TIMEOUT`], in seconds.
+const DYN_KUBE_CR_APPLY_TIMEOUT_SECS: &str = "DYN_KUBE_CR_APPLY_TIMEOUT_SECS";
+/// Attempts per CR write (one initial apply plus one retry).
+const CR_APPLY_ATTEMPTS: u32 = 2;
+
+/// Serializes DynamoWorkerMetadata CR writes without holding the metadata lock across the
+/// network call.
+///
+/// Local mutations bump `generation` while holding the metadata write lock. `applied` is the
+/// CR write lock and records the newest generation known to be persisted.
+struct CrWriter {
+    generation: AtomicU64,
+    applied: Mutex<u64>,
+    apply_timeout: Duration,
+}
+
+impl CrWriter {
+    fn new(apply_timeout: Duration) -> Self {
+        Self {
+            generation: AtomicU64::new(0),
+            applied: Mutex::new(0),
+            apply_timeout,
+        }
+    }
+
+    fn from_env() -> Self {
+        let apply_timeout = std::env::var(DYN_KUBE_CR_APPLY_TIMEOUT_SECS)
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|secs| *secs > 0)
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_CR_APPLY_TIMEOUT);
+        Self::new(apply_timeout)
+    }
+
+    async fn persist_with_retry<P, Fut>(
+        &self,
+        snapshot: &DiscoveryMetadata,
+        persist: &P,
+    ) -> Result<()>
+    where
+        P: Fn(DiscoveryMetadata) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        let mut last_error = None;
+        for attempt in 1..=CR_APPLY_ATTEMPTS {
+            let error =
+                match tokio::time::timeout(self.apply_timeout, persist(snapshot.clone())).await {
+                    Ok(Ok(())) => return Ok(()),
+                    Ok(Err(e)) => e,
+                    Err(_) => anyhow::anyhow!(
+                        "timed out after {:?} applying DynamoWorkerMetadata CR",
+                        self.apply_timeout
+                    ),
+                };
+            tracing::warn!(attempt, "DynamoWorkerMetadata CR write failed: {error}");
+            last_error = Some(error);
+        }
+        let error = last_error.expect("CR_APPLY_ATTEMPTS is non-zero");
+        Err(anyhow::anyhow!(
+            "DynamoWorkerMetadata CR write failed after {CR_APPLY_ATTEMPTS} attempts: {error}"
+        ))
+    }
+}
+
+/// Mutates the in-memory metadata, then persists it to the CR.
+///
+/// The metadata lock is held only for the in-memory mutation, never across the CR apply, so a
+/// stalled apply cannot block other registrations. CR writes are serialized by
+/// `writer.applied` and always apply the latest metadata, so an earlier mutation can never
+/// overwrite a later one. A write whose generation was already covered by a newer persisted
+/// snapshot is skipped. If the write fails, the local mutation is rolled back unless a newer
+/// mutation landed meanwhile; that newer mutation's own CR write then carries this one too.
+async fn mutate_and_persist<R, M, P, Fut>(
+    metadata: &RwLock<DiscoveryMetadata>,
+    writer: &CrWriter,
+    mutate: M,
+    persist: P,
+) -> Result<R>
+where
+    M: FnOnce(&mut DiscoveryMetadata) -> Result<R>,
+    P: Fn(DiscoveryMetadata) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let (result, original, generation) = {
+        let mut guard = metadata.write().await;
+        let original = guard.clone();
+        let result = mutate(&mut guard)?;
+        let generation = writer.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        (result, original, generation)
+    };
+
+    let mut applied = writer.applied.lock().await;
+    if *applied >= generation {
+        // A newer snapshot, which includes this mutation, is already persisted.
+        return Ok(result);
+    }
+    let (snapshot, snapshot_generation) = {
+        let guard = metadata.read().await;
+        (guard.clone(), writer.generation.load(Ordering::SeqCst))
+    };
+
+    match writer.persist_with_retry(&snapshot, &persist).await {
+        Ok(()) => {
+            *applied = snapshot_generation;
+            Ok(result)
+        }
+        Err(e) => {
+            drop(applied);
+            let mut guard = metadata.write().await;
+            if writer.generation.load(Ordering::SeqCst) == generation {
+                tracing::warn!("Failed to persist metadata to CR, rolling back local state: {e}");
+                *guard = original;
+            } else {
+                tracing::warn!(
+                    "Failed to persist metadata to CR; a newer local update exists and will be \
+                     persisted by its own write: {e}"
+                );
+            }
+            Err(e)
+        }
+    }
+}
+
+async fn update_model_taints_and_persist<P, Fut>(
     metadata: &Arc<RwLock<DiscoveryMetadata>>,
+    writer: &Arc<CrWriter>,
     id: ModelCardInstanceId,
     taints: HashSet<String>,
-    persist: F,
+    persist: P,
 ) -> Result<bool>
 where
-    F: FnOnce(DiscoveryMetadata) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<DiscoveryMetadata>> + Send + 'static,
+    P: Fn(DiscoveryMetadata) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
 {
     let metadata = Arc::clone(metadata);
+    let writer = Arc::clone(writer);
     // Once started, persistence and the matching local commit must outlive request cancellation.
     // Dropping the JoinHandle detaches this task instead of cancelling the remote-commit/local-
     // state critical section.
     tokio::spawn(async move {
-        let mut metadata = metadata.write().await;
-        let mut candidate = metadata.clone();
-        let changed = candidate.update_model_taints(&id, taints)?;
-
         // Persist even a local no-op. This repairs an authoritative CR that may differ after an
         // earlier commit/ack ambiguity instead of trusting potentially stale local metadata.
-        let persisted = persist(candidate).await?;
-        *metadata = persisted;
-        Ok(changed)
+        mutate_and_persist(
+            &metadata,
+            &writer,
+            |m| m.update_model_taints(&id, taints),
+            persist,
+        )
+        .await
     })
     .await
     .map_err(|error| anyhow::anyhow!("model taint persistence task failed: {error}"))?
@@ -82,6 +213,7 @@ pub struct KubeDiscoveryClient {
     daemon_state: watch::Receiver<DaemonState>,
     kube_client: KubeClient,
     pod_info: PodInfo,
+    cr_writer: Arc<CrWriter>,
 }
 
 impl KubeDiscoveryClient {
@@ -181,7 +313,30 @@ impl KubeDiscoveryClient {
             daemon_state,
             kube_client,
             pod_info,
+            cr_writer: Arc::new(CrWriter::from_env()),
         })
+    }
+
+    /// Builds the persist function: renders a metadata snapshot into the CR and applies it.
+    fn cr_persister(
+        &self,
+    ) -> impl Fn(DiscoveryMetadata) -> BoxFuture<'static, Result<()>> + Send + 'static {
+        let kube_client = self.kube_client.clone();
+        let namespace = self.pod_info.pod_namespace.clone();
+        let cr_name = self.pod_info.target.cr_name();
+        let pod_name = self.pod_info.pod_name.clone();
+        let pod_uid = self.pod_info.pod_uid.clone();
+        move |snapshot| {
+            let kube_client = kube_client.clone();
+            let namespace = namespace.clone();
+            let cr_name = cr_name.clone();
+            let pod_name = pod_name.clone();
+            let pod_uid = pod_uid.clone();
+            Box::pin(async move {
+                let cr = build_cr(&cr_name, &pod_name, &pod_uid, &snapshot)?;
+                apply_cr(&kube_client, &namespace, &cr).await
+            })
+        }
     }
 }
 
@@ -219,81 +374,61 @@ impl Discovery for KubeDiscoveryClient {
             instance_id
         );
 
-        // Write to local metadata and persist to CR
-        // IMPORTANT: Hold the write lock across the CR write to prevent race conditions
-        let mut metadata = self.metadata.write().await;
-
-        // Clone state for rollback in case CR persistence fails
-        let original_state = metadata.clone();
-
-        let registered_instance = match &instance {
-            DiscoveryInstance::Endpoint(inst) => {
-                tracing::info!(
-                    "Registering endpoint: namespace={}, component={}, endpoint={}, instance_id={:x}",
-                    inst.namespace,
-                    inst.component,
-                    inst.endpoint,
-                    instance_id
-                );
-                metadata.register_endpoint(instance.clone())?;
-                instance.clone()
-            }
-            DiscoveryInstance::Model {
-                namespace,
-                component,
-                endpoint,
-                ..
-            } => {
-                tracing::info!(
-                    "Registering model card: namespace={}, component={}, endpoint={}, instance_id={:x}",
+        // Mutate local metadata under the lock, then persist a snapshot to the CR outside it.
+        let registered_instance = mutate_and_persist(
+            &self.metadata,
+            &self.cr_writer,
+            |metadata| match &instance {
+                DiscoveryInstance::Endpoint(inst) => {
+                    tracing::info!(
+                        "Registering endpoint: namespace={}, component={}, endpoint={}, instance_id={:x}",
+                        inst.namespace,
+                        inst.component,
+                        inst.endpoint,
+                        instance_id
+                    );
+                    metadata.register_endpoint(instance.clone())?;
+                    Ok(instance.clone())
+                }
+                DiscoveryInstance::Model {
                     namespace,
                     component,
                     endpoint,
-                    instance_id
-                );
-                metadata.register_model_card(instance.clone())?
-            }
-            DiscoveryInstance::EventChannel { scope, topic, .. } => {
-                tracing::info!(
-                    "Registering event channel: scope={:?}, topic={}, instance_id={:x}",
-                    scope,
-                    topic,
-                    instance_id
-                );
-                metadata.register_event_channel(instance.clone())?;
-                instance.clone()
-            }
-            DiscoveryInstance::EventSource { scope, topic, .. } => {
-                tracing::info!(
-                    "Registering event source: scope={:?}, topic={}, publisher_id={:x}",
-                    scope,
-                    topic,
-                    instance_id
-                );
-                metadata.register_event_source(instance.clone())?;
-                instance.clone()
-            }
-        };
-
-        // Build and apply the CR with the updated metadata
-        // This persists the metadata to Kubernetes for other pods to discover
-        let cr_name = self.pod_info.target.cr_name();
-        let cr = build_cr(
-            &cr_name,
-            &self.pod_info.pod_name,
-            &self.pod_info.pod_uid,
-            &metadata,
-        )?;
-
-        if let Err(e) = apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await {
-            // Rollback local state on CR persistence failure
-            tracing::warn!(
-                "Failed to persist metadata to CR, rolling back local state: {}",
-                e
-            );
-            *metadata = original_state;
-            return Err(e);
-        }
+                    ..
+                } => {
+                    tracing::info!(
+                        "Registering model card: namespace={}, component={}, endpoint={}, instance_id={:x}",
+                        namespace,
+                        component,
+                        endpoint,
+                        instance_id
+                    );
+                    metadata.register_model_card(instance.clone())
+                }
+                DiscoveryInstance::EventChannel { scope, topic, .. } => {
+                    tracing::info!(
+                        "Registering event channel: scope={:?}, topic={}, instance_id={:x}",
+                        scope,
+                        topic,
+                        instance_id
+                    );
+                    metadata.register_event_channel(instance.clone())?;
+                    Ok(instance.clone())
+                }
+                DiscoveryInstance::EventSource { scope, topic, .. } => {
+                    tracing::info!(
+                        "Registering event source: scope={:?}, topic={}, publisher_id={:x}",
+                        scope,
+                        topic,
+                        instance_id
+                    );
+                    metadata.register_event_source(instance.clone())?;
+                    Ok(instance.clone())
+                }
+            },
+            self.cr_persister(),
+        )
+        .await?;
 
         tracing::debug!("Persisted metadata to DynamoWorkerMetadata CR");
 
@@ -305,20 +440,12 @@ impl Discovery for KubeDiscoveryClient {
         id: ModelCardInstanceId,
         taints: HashSet<String>,
     ) -> Result<()> {
-        let kube_client = self.kube_client.clone();
-        let pod_namespace = self.pod_info.pod_namespace.clone();
-        let cr_name = self.pod_info.target.cr_name();
-        let pod_name = self.pod_info.pod_name.clone();
-        let pod_uid = self.pod_info.pod_uid.clone();
         let changed = update_model_taints_and_persist(
             &self.metadata,
+            &self.cr_writer,
             id,
             taints,
-            move |candidate| async move {
-                let cr = build_cr(&cr_name, &pod_name, &pod_uid, &candidate)?;
-                apply_cr(&kube_client, &pod_namespace, &cr).await?;
-                Ok(candidate)
-            },
+            self.cr_persister(),
         )
         .await?;
         if !changed {
@@ -332,78 +459,61 @@ impl Discovery for KubeDiscoveryClient {
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
         let instance_id = instance.instance_id();
 
-        // Write to local metadata and persist to CR
-        // IMPORTANT: Hold the write lock across the CR write to prevent race conditions
-        let mut metadata = self.metadata.write().await;
-
-        // Clone state for rollback in case CR persistence fails
-        let original_state = metadata.clone();
-
-        match &instance {
-            DiscoveryInstance::Endpoint(inst) => {
-                tracing::info!(
-                    "Unregistering endpoint: namespace={}, component={}, endpoint={}, instance_id={:x}",
-                    inst.namespace,
-                    inst.component,
-                    inst.endpoint,
-                    instance_id
-                );
-                metadata.unregister_endpoint(&instance)?;
-            }
-            DiscoveryInstance::Model {
-                namespace,
-                component,
-                endpoint,
-                ..
-            } => {
-                tracing::info!(
-                    "Unregistering model card: namespace={}, component={}, endpoint={}, instance_id={:x}",
+        // Mutate local metadata under the lock, then persist a snapshot to the CR outside it.
+        mutate_and_persist(
+            &self.metadata,
+            &self.cr_writer,
+            |metadata| {
+            match &instance {
+                DiscoveryInstance::Endpoint(inst) => {
+                    tracing::info!(
+                        "Unregistering endpoint: namespace={}, component={}, endpoint={}, instance_id={:x}",
+                        inst.namespace,
+                        inst.component,
+                        inst.endpoint,
+                        instance_id
+                    );
+                    metadata.unregister_endpoint(&instance)?;
+                }
+                DiscoveryInstance::Model {
                     namespace,
                     component,
                     endpoint,
-                    instance_id
-                );
-                metadata.unregister_model_card(&instance)?;
+                    ..
+                } => {
+                    tracing::info!(
+                        "Unregistering model card: namespace={}, component={}, endpoint={}, instance_id={:x}",
+                        namespace,
+                        component,
+                        endpoint,
+                        instance_id
+                    );
+                    metadata.unregister_model_card(&instance)?;
+                }
+                DiscoveryInstance::EventChannel { scope, topic, .. } => {
+                    tracing::info!(
+                        "Unregistering event channel: scope={:?}, topic={}, instance_id={:x}",
+                        scope,
+                        topic,
+                        instance_id
+                    );
+                    metadata.unregister_event_channel(&instance)?;
+                }
+                DiscoveryInstance::EventSource { scope, topic, .. } => {
+                    tracing::info!(
+                        "Unregistering event source: scope={:?}, topic={}, publisher_id={:x}",
+                        scope,
+                        topic,
+                        instance_id
+                    );
+                    metadata.unregister_event_source(&instance)?;
+                }
             }
-            DiscoveryInstance::EventChannel { scope, topic, .. } => {
-                tracing::info!(
-                    "Unregistering event channel: scope={:?}, topic={}, instance_id={:x}",
-                    scope,
-                    topic,
-                    instance_id
-                );
-                metadata.unregister_event_channel(&instance)?;
-            }
-            DiscoveryInstance::EventSource { scope, topic, .. } => {
-                tracing::info!(
-                    "Unregistering event source: scope={:?}, topic={}, publisher_id={:x}",
-                    scope,
-                    topic,
-                    instance_id
-                );
-                metadata.unregister_event_source(&instance)?;
-            }
-        }
-
-        // Build and apply the CR with the updated metadata
-        // This persists the removal to Kubernetes for other pods to see
-        let cr_name = self.pod_info.target.cr_name();
-        let cr = build_cr(
-            &cr_name,
-            &self.pod_info.pod_name,
-            &self.pod_info.pod_uid,
-            &metadata,
-        )?;
-
-        if let Err(e) = apply_cr(&self.kube_client, &self.pod_info.pod_namespace, &cr).await {
-            // Rollback local state on CR persistence failure
-            tracing::warn!(
-                "Failed to persist metadata removal to CR, rolling back local state: {}",
-                e
-            );
-            *metadata = original_state;
-            return Err(e);
-        }
+                Ok(())
+            },
+            self.cr_persister(),
+        )
+        .await?;
 
         tracing::debug!("Persisted metadata removal to DynamoWorkerMetadata CR");
 
@@ -930,19 +1040,27 @@ mod tests {
         let task_metadata = metadata.clone();
         let remote = Arc::new(RwLock::new(DiscoveryMetadata::new()));
         let task_remote = remote.clone();
+        let writer = Arc::new(CrWriter::new(Duration::from_secs(30)));
         let (remote_committed_tx, remote_committed_rx) = tokio::sync::oneshot::channel();
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        let once = Arc::new(std::sync::Mutex::new(Some((remote_committed_tx, ack_rx))));
 
         let task = tokio::spawn(async move {
             update_model_taints_and_persist(
                 &task_metadata,
+                &writer,
                 id,
                 HashSet::from(["new".to_string()]),
-                move |candidate| async move {
-                    *task_remote.write().await = candidate.clone();
-                    remote_committed_tx.send(()).unwrap();
-                    ack_rx.await.unwrap();
-                    Ok(candidate)
+                move |candidate| {
+                    let task_remote = task_remote.clone();
+                    let once = once.clone();
+                    async move {
+                        let (remote_committed_tx, ack_rx) = once.lock().unwrap().take().unwrap();
+                        *task_remote.write().await = candidate;
+                        remote_committed_tx.send(()).unwrap();
+                        ack_rx.await.unwrap();
+                        Ok(())
+                    }
                 },
             )
             .await
@@ -996,13 +1114,18 @@ mod tests {
         let persisted = Arc::new(RwLock::new(None));
         let task_persisted = persisted.clone();
 
+        let writer = Arc::new(CrWriter::new(Duration::from_secs(30)));
         let changed = update_model_taints_and_persist(
             &metadata,
+            &writer,
             id,
             HashSet::from(["old".to_string()]),
-            move |candidate| async move {
-                *task_persisted.write().await = Some(candidate.clone());
-                Ok(candidate)
+            move |candidate| {
+                let task_persisted = task_persisted.clone();
+                async move {
+                    *task_persisted.write().await = Some(candidate);
+                    Ok(())
+                }
             },
         )
         .await
@@ -1023,5 +1146,175 @@ mod tests {
             card_json["runtime_config"]["taints"],
             serde_json::json!(["old"])
         );
+    }
+
+    fn endpoint_instance(endpoint: &str) -> DiscoveryInstance {
+        DiscoverySpec::Endpoint {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+            endpoint: endpoint.to_string(),
+            transport: TransportType::Tcp("127.0.0.1:1".to_string()),
+            device_type: None,
+            request_plane_codec: None,
+        }
+        .into_instance(1)
+    }
+
+    fn register(instance: DiscoveryInstance) -> impl FnOnce(&mut DiscoveryMetadata) -> Result<()> {
+        move |m| m.register_endpoint(instance)
+    }
+
+    // The metadata lock must not be held across the CR apply: a second registration finishes
+    // its in-memory update while the first apply is stalled.
+    #[tokio::test]
+    async fn stalled_cr_apply_does_not_block_other_registrations() {
+        let metadata = Arc::new(RwLock::new(DiscoveryMetadata::new()));
+        let writer = Arc::new(CrWriter::new(Duration::from_secs(30)));
+        let (stall_tx, stall_rx) = tokio::sync::oneshot::channel::<()>();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let stall = Arc::new(std::sync::Mutex::new(Some((started_tx, stall_rx))));
+
+        let first = {
+            let (metadata, writer) = (metadata.clone(), writer.clone());
+            tokio::spawn(async move {
+                mutate_and_persist(
+                    &metadata,
+                    &writer,
+                    register(endpoint_instance("first")),
+                    move |_| {
+                        let stall = stall.clone();
+                        async move {
+                            let (started_tx, stall_rx) = stall.lock().unwrap().take().unwrap();
+                            started_tx.send(()).unwrap();
+                            stall_rx.await.unwrap();
+                            Ok(())
+                        }
+                    },
+                )
+                .await
+            })
+        };
+        started_rx.await.unwrap();
+
+        // The second mutation completes in memory while the first apply is in flight.
+        let second = {
+            let (metadata, writer) = (metadata.clone(), writer.clone());
+            tokio::spawn(async move {
+                mutate_and_persist(
+                    &metadata,
+                    &writer,
+                    register(endpoint_instance("second")),
+                    |_| async { Ok(()) },
+                )
+                .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while metadata.read().await.get_all_endpoints().len() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("second registration was blocked behind the stalled CR apply");
+        assert!(!second.is_finished(), "second CR write must wait its turn");
+
+        stall_tx.send(()).unwrap();
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+    }
+
+    // Concurrent writers serialize and the last CR content reflects the latest metadata, even
+    // when an earlier writer is slow.
+    #[tokio::test]
+    async fn final_cr_reflects_latest_metadata() {
+        let metadata = Arc::new(RwLock::new(DiscoveryMetadata::new()));
+        let writer = Arc::new(CrWriter::new(Duration::from_secs(30)));
+        let cr = Arc::new(std::sync::Mutex::new(None::<DiscoveryMetadata>));
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let gate = Arc::new(std::sync::Mutex::new(Some((started_tx, release_rx))));
+
+        type Gate = Arc<
+            std::sync::Mutex<
+                Option<(
+                    tokio::sync::oneshot::Sender<()>,
+                    tokio::sync::oneshot::Receiver<()>,
+                )>,
+            >,
+        >;
+        let persist = |cr: Arc<std::sync::Mutex<Option<DiscoveryMetadata>>>, gate: Option<Gate>| {
+            move |snapshot: DiscoveryMetadata| {
+                let cr = cr.clone();
+                let gate = gate.clone();
+                async move {
+                    let held = gate.and_then(|g| g.lock().unwrap().take());
+                    if let Some((started_tx, release_rx)) = held {
+                        started_tx.send(()).unwrap();
+                        release_rx.await.unwrap();
+                    }
+                    *cr.lock().unwrap() = Some(snapshot);
+                    Ok(())
+                }
+            }
+        };
+
+        let first = {
+            let (metadata, writer) = (metadata.clone(), writer.clone());
+            let persist = persist(cr.clone(), Some(gate));
+            tokio::spawn(async move {
+                mutate_and_persist(
+                    &metadata,
+                    &writer,
+                    register(endpoint_instance("a")),
+                    persist,
+                )
+                .await
+            })
+        };
+        started_rx.await.unwrap();
+        let second = {
+            let (metadata, writer) = (metadata.clone(), writer.clone());
+            let persist = persist(cr.clone(), None);
+            tokio::spawn(async move {
+                mutate_and_persist(
+                    &metadata,
+                    &writer,
+                    register(endpoint_instance("b")),
+                    persist,
+                )
+                .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        release_tx.send(()).unwrap();
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+
+        let persisted = cr.lock().unwrap().clone().expect("CR never written");
+        assert_eq!(persisted.get_all_endpoints().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn cr_apply_timeout_returns_error_and_rolls_back() {
+        let metadata = Arc::new(RwLock::new(DiscoveryMetadata::new()));
+        let writer = CrWriter::new(Duration::from_millis(20));
+        let attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counter = attempts.clone();
+
+        let err = mutate_and_persist(
+            &metadata,
+            &writer,
+            register(endpoint_instance("slow")),
+            move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<Result<()>>()
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("timed out"), "{err}");
+        assert_eq!(attempts.load(Ordering::SeqCst), CR_APPLY_ATTEMPTS);
+        assert!(metadata.read().await.get_all_endpoints().is_empty());
     }
 }
