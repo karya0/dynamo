@@ -202,7 +202,12 @@ class StateAgentLifecycle:
                 self._close_after_start(owner, startup)
             )
             raise
+        # Registered intent is not an attachment: until the agent has subscribed,
+        # events the engine publishes are lost. Keep the owner set so a timeout
+        # or cancellation here is withdrawn by close(); the error fails the
+        # worker closed before it can become routable.
         self._owner = owner
+        await owner.await_attached()
         logger.info("Attached %d KVCR inventory owners", len(descriptors))
 
     async def _close_after_start(self, owner, startup):

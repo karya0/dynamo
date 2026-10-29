@@ -272,7 +272,9 @@ async def test_cleanup_timeout_preserves_body_exception(
 ):
     engine, config, _, _ = fixture()
     owner = SimpleNamespace(
-        start=AsyncMock(), close=AsyncMock(side_effect=asyncio.Event().wait)
+        start=AsyncMock(),
+        await_attached=AsyncMock(),
+        close=AsyncMock(side_effect=asyncio.Event().wait),
     )
     monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", lambda *args: owner)
     monkeypatch.setattr(kv_state_agent, "_STATE_AGENT_CLOSE_TIMEOUT_SECS", 0.01)
@@ -293,6 +295,47 @@ async def test_cleanup_timeout_preserves_body_exception(
 
 
 @pytest.mark.asyncio
+async def test_start_waits_for_attach_ack(monkeypatch):
+    engine, config, _, _ = fixture()
+    ack = asyncio.Event()
+
+    async def await_attached():
+        await ack.wait()
+
+    owner = SimpleNamespace(
+        start=AsyncMock(), await_attached=await_attached, close=AsyncMock()
+    )
+    monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", lambda *args: owner)
+    lifecycle = StateAgentLifecycle()
+    endpoint = SimpleNamespace(connection_id=lambda: 17)
+    task = asyncio.create_task(lifecycle.start(engine, config, endpoint))
+    await asyncio.sleep(0.05)
+    owner.start.assert_awaited_once()
+    assert not task.done()
+    ack.set()
+    await asyncio.wait_for(task, timeout=1)
+    await lifecycle.close()
+    owner.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ack_timeout_closes_retained_owner(monkeypatch):
+    engine, config, _, _ = fixture()
+    owner = SimpleNamespace(
+        start=AsyncMock(),
+        await_attached=AsyncMock(side_effect=RuntimeError("did not acknowledge")),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", lambda *args: owner)
+    lifecycle = StateAgentLifecycle()
+    with pytest.raises(RuntimeError, match="did not acknowledge"):
+        await lifecycle.start(engine, config, SimpleNamespace(connection_id=lambda: 17))
+    assert lifecycle._owner is owner
+    await lifecycle.close()
+    owner.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_cancelled_start_cleanup_timeout_preserves_withdrawal(
     monkeypatch, caplog
 ):
@@ -307,7 +350,9 @@ async def test_cancelled_start_cleanup_timeout_preserves_withdrawal(
     async def close():
         assert native_result.done() and not native_result.cancelled()
 
-    owner = SimpleNamespace(start=start, close=AsyncMock(side_effect=close))
+    owner = SimpleNamespace(
+        start=start, await_attached=AsyncMock(), close=AsyncMock(side_effect=close)
+    )
     monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", lambda *args: owner)
     monkeypatch.setattr(kv_state_agent, "_STATE_AGENT_CLOSE_TIMEOUT_SECS", 0.01)
     lifecycle = StateAgentLifecycle()
@@ -345,7 +390,9 @@ def test_cancelled_start_withdraws_registered_owner(monkeypatch, native_finished
         async def close():
             assert native_result.done() and not native_result.cancelled()
 
-        owner = SimpleNamespace(start=start, close=AsyncMock(side_effect=close))
+        owner = SimpleNamespace(
+        start=start, await_attached=AsyncMock(), close=AsyncMock(side_effect=close)
+    )
         monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", lambda *args: owner)
         lifecycle = StateAgentLifecycle()
         endpoint = SimpleNamespace(connection_id=lambda: 17)
