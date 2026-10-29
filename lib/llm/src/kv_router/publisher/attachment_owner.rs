@@ -358,6 +358,9 @@ fn attach_timeout(mut get_env: impl FnMut(&str) -> Option<OsString>) -> Duration
 /// watch is only a wake-up to re-list. A record from another incarnation
 /// (a previous run of the same producer) never satisfies the wait. A zero
 /// timeout checks one snapshot; cancelling `shutdown` aborts the wait.
+/// The ack means every expected record is present in one `list` snapshot
+/// (per endpoint) at ack time; an entry withdrawn after it was first seen
+/// sends the wait back to waiting.
 async fn await_attachments(
     discovery: &dyn Discovery,
     expected: &[(EndpointId, Instance, u64)],
@@ -368,29 +371,39 @@ async fn await_attachments(
     let watch_cancel = shutdown.child_token();
     let _watch_guard = watch_cancel.clone().drop_guard();
     let wait = async {
-        for (endpoint, producer, incarnation) in expected {
-            if attachment_present(discovery, endpoint, producer, *incarnation).await? {
-                continue;
-            }
-            if timeout.is_zero() {
-                anyhow::bail!("attachment for intent incarnation {incarnation} is not advertised");
-            }
-            tracing::info!(incarnation, "KV state-agent attachment pending; waiting");
-            let mut events = discovery
-                .list_and_watch(attachment_query(endpoint), Some(watch_cancel.clone()))
-                .await
-                .context("failed to watch for the KV state-agent attachment")?;
-            loop {
-                let Some(event) = events.next().await else {
-                    anyhow::bail!("KV state-agent attachment watch ended before the attach ack");
-                };
-                event.context("KV state-agent attachment watch failed")?;
+        loop {
+            for (endpoint, producer, incarnation) in expected {
                 if attachment_present(discovery, endpoint, producer, *incarnation).await? {
-                    break;
+                    continue;
+                }
+                if timeout.is_zero() {
+                    anyhow::bail!(
+                        "attachment for intent incarnation {incarnation} is not advertised"
+                    );
+                }
+                tracing::info!(incarnation, "KV state-agent attachment pending; waiting");
+                let mut events = discovery
+                    .list_and_watch(attachment_query(endpoint), Some(watch_cancel.clone()))
+                    .await
+                    .context("failed to watch for the KV state-agent attachment")?;
+                loop {
+                    let Some(event) = events.next().await else {
+                        anyhow::bail!(
+                            "KV state-agent attachment watch ended before the attach ack"
+                        );
+                    };
+                    event.context("KV state-agent attachment watch failed")?;
+                    if attachment_present(discovery, endpoint, producer, *incarnation).await? {
+                        break;
+                    }
                 }
             }
+            // An earlier entry may have been withdrawn while a later one was awaited, so
+            // ack only if one final snapshot per endpoint holds every expected entry.
+            if all_attached(discovery, expected).await? {
+                return Ok::<(), anyhow::Error>(());
+            }
         }
-        Ok::<(), anyhow::Error>(())
     };
     tokio::select! {
         biased;
@@ -426,7 +439,32 @@ async fn attachment_present(
         .list(attachment_query(endpoint))
         .await
         .context("failed to list KV state-agent attachments")?;
-    Ok(instances.into_iter().any(|instance| {
+    Ok(has_attachment(&instances, producer, incarnation))
+}
+
+/// Does one `list` snapshot per endpoint hold every expected attachment?
+async fn all_attached(
+    discovery: &dyn Discovery,
+    expected: &[(EndpointId, Instance, u64)],
+) -> Result<bool> {
+    let mut snapshots: HashMap<&EndpointId, Vec<DiscoveryInstance>> = HashMap::new();
+    for (endpoint, producer, incarnation) in expected {
+        if !snapshots.contains_key(endpoint) {
+            let instances = discovery
+                .list(attachment_query(endpoint))
+                .await
+                .context("failed to list KV state-agent attachments")?;
+            snapshots.insert(endpoint, instances);
+        }
+        if !has_attachment(&snapshots[endpoint], producer, *incarnation) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn has_attachment(instances: &[DiscoveryInstance], producer: &Instance, incarnation: u64) -> bool {
+    instances.iter().any(|instance| {
         let DiscoveryInstance::EventSource {
             topic, metadata, ..
         } = instance
@@ -434,10 +472,10 @@ async fn attachment_present(
             return false;
         };
         topic == KV_STATE_ATTACHMENT_TOPIC_V2
-            && serde_json::from_value::<KvStateAttachmentAdvertisement>(metadata).is_ok_and(|ad| {
-                ad.producer_instance == *producer && ad.intent_incarnation == incarnation
-            })
-    }))
+            && serde_json::from_value::<KvStateAttachmentAdvertisement>(metadata.clone()).is_ok_and(
+                |ad| ad.producer_instance == *producer && ad.intent_incarnation == incarnation,
+            )
+    })
 }
 
 /// Shared so the zero-timeout path stays byte-identical to the legacy error message.
@@ -1135,6 +1173,54 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("did not acknowledge"), "{message}");
         assert!(message.contains(ATTACH_TIMEOUT_ENV), "{message}");
+    }
+
+    /// An entry withdrawn after it was first seen, while a later entry is still
+    /// awaited, must not count: no ack until it is advertised again.
+    #[tokio::test]
+    async fn attach_ack_requires_all_entries_present_at_ack_time() {
+        let discovery = mock_discovery();
+        let first = instance("producer", 11);
+        let second = instance("producer", 12);
+        register_attachment(discovery.as_ref(), 1, &first, 100).await;
+        let expected = vec![
+            (endpoint_id(), first.clone(), 100),
+            (endpoint_id(), second.clone(), 200),
+        ];
+
+        let mutator = discovery.clone();
+        let changes = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let withdrawn = mutator
+                .list(attachment_query(&endpoint_id()))
+                .await
+                .unwrap()
+                .remove(0);
+            mutator.unregister(withdrawn).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            register_attachment(mutator.as_ref(), 2, &second, 200).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            register_attachment(mutator.as_ref(), 3, &first, 100).await;
+            tokio::time::Instant::now()
+        });
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            await_attachments(
+                discovery.as_ref(),
+                &expected,
+                Duration::from_secs(30),
+                &CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("re-advertising the withdrawn entry must wake the wait")
+        .unwrap();
+        let acked_at = tokio::time::Instant::now();
+        let readvertised_at = changes.await.unwrap();
+        assert!(
+            acked_at >= readvertised_at,
+            "acked before the withdrawn entry was advertised again"
+        );
     }
 
     /// A record for another producer with the same incarnation id is not ours.
