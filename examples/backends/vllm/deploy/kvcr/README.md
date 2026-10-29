@@ -140,7 +140,7 @@ transfer.
 
 `agg-guard-daemonset.yaml` runs the KVCR Guard as a DaemonSet Pod, separate from
 the worker DGD, so the pool survives a worker restart. There is no state agent:
-the worker uses the normal KV event publisher and `--router-mode kv` routing.
+the worker uses the normal KV event publisher and KV routing (`DYN_ROUTER_MODE=kv`).
 It needs a KVCR build that hands the pool to the worker as a file descriptor.
 
 Render with an explicit variable list so the worker's shell variables survive:
@@ -149,8 +149,8 @@ ${DYNAMO_RDMA_RESOURCE} ${DYNAMO_UCX_NET_DEVICES}'`. Apply the DaemonSet and
 wait for it to be Ready, then the DGD. Delete only the DGD to restart the worker
 against the same Guard.
 
-- Both Pods run as uid 1000; the socket is mode 0600, so only that uid can
-  connect.
+- Both Pods run as uid 1000; the socket is mode 0600, so no other non-root uid
+  can connect. Root in any Pod that mounts the node's `/dev/shm` can.
 - The Guard creates its 0600 socket in the node's `/dev/shm` (`hostPath`, type
   `Directory`); the worker mounts it read-only. The pool is an `emptyDir` in the
   Guard Pod only, and no init container or chown is needed.
@@ -158,5 +158,6 @@ against the same Guard.
 
 Known limits: one Guard pool per node, so the worker uses required
 anti-affinity to run one per node. After a worker restart the router does not
-know about blocks the Guard kept until they are stored or touched again; the
-worker still reuses them on lookup.
+know about blocks the Guard kept until they are stored or touched again, and
+other nodes' workers cannot read from a Guard whose worker is down. Only the
+next worker on the same node reuses the kept pool.

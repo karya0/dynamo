@@ -172,8 +172,12 @@ spec:
             }))
             PY
             )
-            # Wait for the node's Guard socket instead of crash-looping before it exists.
-            for _ in $(seq 300); do [ -S /host-shm/kvcr-qwen3-0-6b.sock ] && break; sleep 1; done
+            # Wait until the node's Guard accepts connections; a stale socket file
+            # from a restarted Guard can exist before the new Guard listens.
+            for _ in $(seq 300); do
+              python3 -c "import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(1); s.connect('/host-shm/kvcr-qwen3-0-6b.sock')" 2>/dev/null && break
+              sleep 1
+            done || true
             ulimit -l unlimited || true
             exec python3 -m dynamo.vllm \
               --model Qwen/Qwen3-0.6B \
