@@ -61,7 +61,7 @@ def is_single_rank_linker(server_args) -> bool:
 
 
 def kvcr_hint_endpoints(
-    scheduler_infos, rank_bounds, *, require_inventory=False
+    scheduler_infos, rank_bounds, *, require=None
 ) -> dict[str, str]:
     """Validate SGLang-owned coordinates; never infer backend defaults or offsets."""
     endpoints: dict[str, str] = {}
@@ -78,12 +78,14 @@ def kvcr_hint_endpoints(
                 raise ValueError("SGLang KV hint capabilities must be a list")
             if "router_hint" not in capabilities:
                 continue
-            if require_inventory and (
+            if require == "inventory" and (
                 "kvcr_inventory" not in capabilities
                 or source.get("inventory_lifetime") != "process_local"
                 or source.get("reset_clears_owner_inventory") is not True
                 or source.get("owner_incarnation_scoped") is not True
             ):
+                continue
+            if require == "guard" and source.get("inventory_lifetime") != "guard":
                 continue
             rank = source.get("dp_rank")
             endpoint = source.get("source_control_endpoint")
@@ -117,7 +119,7 @@ def kvcr_hint_endpoints(
                     raise ValueError(
                         "SGLang KV hint source cannot advertise a wildcard"
                     )
-            if require_inventory:
+            if require:
                 host = parsed.hostname
                 validate_advertise_host(f"[{host}]" if ":" in host else host)
             key = str(rank)
@@ -147,11 +149,14 @@ def publish_kvcr_hint_capabilities(
     init_result = getattr(engine, "_scheduler_init_result", None)
     if init_result is None:
         return
-    endpoints = kvcr_hint_endpoints(
-        init_result.scheduler_infos,
-        model_card_dp_rank_bounds(server_args),
-        require_inventory=linker,
-    )
+    bounds = model_card_dp_rank_bounds(server_args)
+    endpoints = {}
+    for require in ("inventory", "guard") if linker else (None,):
+        endpoints = kvcr_hint_endpoints(
+            init_result.scheduler_infos, bounds, require=require
+        )
+        if endpoints:
+            break
     if not endpoints:
         return
     for key, value in (
