@@ -84,6 +84,96 @@ def test_descriptors_use_only_reported_sources():
     assert state_agent_descriptors(engine, config) == []
 
 
+def linker_fixture():
+    engine, config, source, info = fixture()
+    config.server_args.enable_hierarchical_cache = False
+    config.server_args.enable_unified_cache_external_linker = True
+    config.server_args.unified_cache_external_linker_backend = "kvcr"
+    config.server_args.tp_size = 1
+    config.server_args.page_size = 64
+    source["inventory_lifetime"] = "process_local"
+    source["reset_clears_owner_inventory"] = True
+    source["owner_incarnation_scoped"] = True
+    info["kv_event_sources"][0]["topic"] = kv_state_agent.worker_raw_topic(
+        [source["cache_owner_id"]]
+    )
+
+    async def async_generate(*, kv_hints=None):
+        return kv_hints
+
+    engine.async_generate = async_generate
+    return engine, config, source, info
+
+
+def test_linker_descriptor_uses_reported_owner_endpoint_and_event_source():
+    engine, config, source, _ = linker_fixture()
+    (descriptor,) = state_agent_descriptors(engine, config)
+    assert descriptor["cache_owner_id"] == source["cache_owner_id"]
+    assert descriptor["raw_zmq_endpoint"] == "tcp://worker:24020"
+    assert descriptor["raw_topic"] == kv_state_agent.worker_raw_topic(
+        [source["cache_owner_id"]]
+    )
+    assert descriptor["kv_block_size"] == 64
+    assert descriptor["router_hint_source"] == {
+        "source_control_endpoint": "tcp://worker:24100",
+        "worker_type": "aggregated",
+    }
+
+
+@pytest.mark.parametrize(
+    "change,mode,match",
+    [
+        ({"tp_size": 2}, DisaggregationMode.AGGREGATED, "TP1 linker"),
+        ({"dp_size": 2}, DisaggregationMode.AGGREGATED, "TP1 linker"),
+        ({"attn_cp_size": 2}, DisaggregationMode.AGGREGATED, "TP1 linker"),
+        ({}, DisaggregationMode.PREFILL, "aggregated hint-forwarding"),
+    ],
+)
+def test_linker_inventory_rejects_unsupported_layouts(change, mode, match):
+    engine, config, _, _ = linker_fixture()
+    vars(config.server_args).update(change)
+    config.serving_mode = mode
+    with pytest.raises(ValueError, match=match):
+        state_agent_descriptors(engine, config)
+
+
+def test_linker_inventory_requires_hint_forwarding_and_reported_inventory():
+    engine, config, source, info = linker_fixture()
+    engine.async_generate = lambda: None
+    with pytest.raises(ValueError, match="hint-forwarding"):
+        state_agent_descriptors(engine, config)
+    source["capabilities"] = ["router_hint"]
+    assert state_agent_descriptors(engine, config) == []
+    del info["kv_hint_sources"]
+    assert state_agent_descriptors(engine, config) == []
+
+
+@pytest.mark.parametrize(
+    "change,match",
+    [
+        ("lifetime", "process-local"),
+        ("reset", "reset and incarnation"),
+        ("incarnation", "reset and incarnation"),
+        ("block_size", "block size"),
+        ("topic", "topic must identify"),
+    ],
+)
+def test_linker_inventory_rejects_wrong_ownership_contract(change, match):
+    engine, config, source, info = linker_fixture()
+    if change == "lifetime":
+        source["inventory_lifetime"] = "persistent"
+    elif change == "reset":
+        source["reset_clears_owner_inventory"] = False
+    elif change == "incarnation":
+        source["owner_incarnation_scoped"] = False
+    elif change == "block_size":
+        info["kv_event_sources"][0]["block_size"] = 128
+    else:
+        info["kv_event_sources"][0]["topic"] = "other"
+    with pytest.raises(ValueError, match=match):
+        state_agent_descriptors(engine, config)
+
+
 @pytest.mark.parametrize(
     "target,updates,match",
     [
