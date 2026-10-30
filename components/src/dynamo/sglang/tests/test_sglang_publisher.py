@@ -585,7 +585,7 @@ def test_init_kv_event_publish_skips_legacy_publisher_for_guard_source(monkeypat
         port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics", instance_id=""),
         _scheduler_init_result=SimpleNamespace(
             scheduler_infos=[{"kv_hint_sources": [guard]}]
-        )
+        ),
     )
     config = SimpleNamespace(
         server_args=SimpleNamespace(
