@@ -842,6 +842,64 @@ mod tests {
         assert_eq!(selected.video_token_id, Some(100));
     }
 
+    /// The descriptor the SGLang Guard mode emits (see
+    /// `test_guard_descriptor_is_accepted_by_attachment_owner`), parsed field by
+    /// field as the Python binding does.
+    #[test]
+    fn guard_descriptor_is_accepted_by_attachment_owner() {
+        let owner = format!(
+            "{}:{}/{}/{}",
+            "01".repeat(16),
+            "02".repeat(16),
+            "00".repeat(8),
+            "03".repeat(16)
+        );
+        let json = serde_json::json!({
+            "cache_owner_id": owner,
+            "global_dp_rank": 0,
+            "kv_state_endpoint": "ns/backend/generate",
+            "indexer_domain_id": owner.split('/').next().unwrap(),
+            "kv_block_size": 64,
+            "ingress_protocol": "vllm_residency_v1",
+            "raw_zmq_endpoint": "tcp://10.0.20.27:24020",
+            "raw_topic": "",
+            "image_token_id": null,
+            "video_token_id": null,
+            "router_hint_source": {
+                "source_control_endpoint": "tcp://10.0.20.27:19500",
+                "worker_type": "aggregated",
+            },
+        });
+        let descriptor = KvStateAttachmentDescriptor {
+            cache_owner_id: json["cache_owner_id"].as_str().unwrap().parse().unwrap(),
+            worker: WorkerWithDpRank::new(17, 0),
+            kv_state_endpoint: json["kv_state_endpoint"].as_str().unwrap().parse().unwrap(),
+            indexer_domain_id: json["indexer_domain_id"].as_str().unwrap().parse().unwrap(),
+            kv_block_size: 64,
+            ingress_protocol: serde_json::from_value(json["ingress_protocol"].clone()).unwrap(),
+            raw_zmq_endpoint: json["raw_zmq_endpoint"].as_str().unwrap().to_string(),
+            raw_topic: String::new(),
+            image_token_id: None,
+            video_token_id: None,
+            router_hint_source: serde_json::from_value(json["router_hint_source"].clone()).unwrap(),
+        };
+        let intents =
+            materialize_intents(&host(), &instance("producer", 11), 17, vec![descriptor]).unwrap();
+        let intent = &intents[&0];
+        assert_eq!(
+            intent.ingress_protocol,
+            KvStateIngressProtocol::VllmResidencyV1
+        );
+        assert_eq!(
+            intent
+                .router_hint_source
+                .as_ref()
+                .unwrap()
+                .source_control_endpoint,
+            "tcp://10.0.20.27:19500"
+        );
+    }
+
     #[tokio::test]
     async fn kth_registration_failure_rolls_back_every_intent() {
         let discovery = ControlledDiscovery::new(Some(2), None);

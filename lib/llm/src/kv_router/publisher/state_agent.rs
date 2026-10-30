@@ -3036,6 +3036,110 @@ mod tests {
         );
     }
 
+    /// Owner-domain events a store, a detach and a re-attach leave behind.
+    async fn owner_inventory_after_reattach(protocol: KvStateIngressProtocol) -> (usize, usize) {
+        let worker = WorkerWithDpRank::new(17, 3);
+        let (mut coordinator, _) = unattached_coordinator(3);
+        let mut attachment = test_attachment(worker, "tcp://framework");
+        attachment.ingress_protocol = protocol;
+        coordinator.attach(&mut attachment).await.unwrap();
+        coordinator.mark_ready(attachment.generation).unwrap();
+        coordinator
+            .handle_ingress(IngressBatch {
+                generation: attachment.generation,
+                source_cursor: 1,
+                chunk_index: 0,
+                final_chunk: true,
+                events: vec![store(worker, ResidencyDomain::CacheOwner, None, 201, 21)],
+                source_fault: None,
+                cache_owner_fault: None,
+            })
+            .await
+            .unwrap();
+        let owner = coordinator.identity.cache_owner_id;
+        let count = |coordinator: &Coordinator<RecordingSink>| {
+            let indexer = coordinator.local_indexer.clone();
+            async move {
+                let WorkerKvQueryResponse::TreeDump { events, .. } =
+                    indexer.get_events_in_id_range(None, None).await
+                else {
+                    panic!("expected full snapshot")
+                };
+                events
+                    .iter()
+                    .filter(|event| event.state_source == Some(owner))
+                    .count()
+            }
+        };
+        let before = count(&coordinator).await;
+        coordinator.begin_detach(attachment.generation).unwrap();
+        coordinator
+            .complete_detach(attachment.generation)
+            .await
+            .unwrap();
+        let mut replacement = test_attachment(worker, "tcp://framework-2");
+        replacement.ingress_protocol = protocol;
+        coordinator.attach(&mut replacement).await.unwrap();
+        (before, count(&coordinator).await)
+    }
+
+    #[tokio::test]
+    async fn reset_event_clears_process_local_inventory() {
+        let (before, after) =
+            owner_inventory_after_reattach(KvStateIngressProtocol::SglangHiCacheV1).await;
+        assert_eq!((before, after), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn reset_event_does_not_clear_guard_inventory() {
+        let (before, after) =
+            owner_inventory_after_reattach(KvStateIngressProtocol::VllmResidencyV1).await;
+        assert_eq!((before, after), (1, 1));
+    }
+
+    #[test]
+    fn namespaced_event_hashes_route_to_owner() {
+        let worker = WorkerWithDpRank::new(17, 3);
+        let mut namespaced = raw_store(Some("CPU"), Some("kvcr"), 501);
+        let RawKvEvent::BlockStored {
+            cache_namespace, ..
+        } = &mut namespaced
+        else {
+            unreachable!()
+        };
+        *cache_namespace = Some("tenant-a".to_string());
+        let normalized = normalize_raw_batch(
+            vec![namespaced, raw_store(Some("CPU"), Some("kvcr"), 501)],
+            worker,
+            4,
+            KvStateIngressProtocol::VllmResidencyV1,
+            &mut ZmqEventNormalizer::new(4),
+            &mut ZmqEventNormalizer::new(4),
+        );
+        assert_eq!(normalized.source_fault, None);
+        assert_eq!(normalized.cache_owner_fault, None);
+        let hashes = normalized
+            .events
+            .iter()
+            .map(|event| {
+                assert_eq!(
+                    event.placement.residency_domain,
+                    ResidencyDomain::CacheOwner
+                );
+                let KvCacheEventData::Stored(data) = &event.event.data else {
+                    panic!("expected a store")
+                };
+                (data.blocks[0].block_hash, data.blocks[0].tokens_hash)
+            })
+            .collect::<Vec<_>>();
+        // The event hash is the producer's, so it routes to the owner as given;
+        // the namespace only salts the token-chain hash.
+        assert_eq!(hashes.len(), 2);
+        assert_eq!(hashes[0].0, ExternalSequenceBlockHash(501));
+        assert_eq!(hashes[0].0, hashes[1].0);
+        assert_ne!(hashes[0].1, hashes[1].1);
+    }
+
     #[tokio::test]
     async fn lossy_sequence_and_publication_failures_do_not_reuse_outbound_ids() {
         let worker = WorkerWithDpRank::new(17, 3);
