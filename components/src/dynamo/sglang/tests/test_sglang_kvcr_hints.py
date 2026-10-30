@@ -13,16 +13,13 @@ from dynamo.common.constants import (
     KV_HINT_TRANSFER_CAPABILITY_KEY,
     KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
     KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
-    DisaggregationMode,
 )
-from dynamo.common.kv_state_agent import worker_raw_topic
 from dynamo.llm import ModelType, WorkerType
 from dynamo.sglang.kv_hints import (
     kv_hint_kwargs,
     kvcr_hint_endpoints,
     publish_kvcr_hint_capabilities,
 )
-from dynamo.sglang.state_agent import state_agent_descriptors
 
 # Marker-only collection may provide only partial SGLang stubs.
 _register_import_error = None
@@ -111,92 +108,6 @@ def test_linker_hint_advertisement_requires_real_inventory_and_supported_engine(
     args.tp_size = 1
     publish_kvcr_hint_capabilities(runtime, engine, args, WorkerType.Prefill)
     assert values == {}
-
-
-def test_linker_registration_uses_state_agent(monkeypatch):
-    if _register_import_error is not None:
-        raise _register_import_error
-    args = SimpleNamespace(
-        enable_hierarchical_cache=False,
-        enable_unified_cache_external_linker=True,
-        unified_cache_external_linker_backend="kvcr",
-        nnodes=1,
-        tp_size=1,
-        dp_size=1,
-        pp_size=1,
-        page_size=64,
-        tokenizer_worker_num=1,
-        model_path="test-model",
-        served_model_name="test-model",
-    )
-    source = {
-        "dp_rank": 0,
-        "capabilities": ["router_hint", "kvcr_inventory"],
-        "source_control_endpoint": "tcp://worker:24100",
-        "cache_owner_id": f"{'01' * 16}:{'02' * 16}/{'00' * 8}/{'03' * 16}",
-        "inventory_lifetime": "process_local",
-        "reset_clears_owner_inventory": True,
-        "owner_incarnation_scoped": True,
-    }
-    engine = _HintEngine()
-    engine._scheduler_init_result = SimpleNamespace(
-        scheduler_infos=[
-            {
-                "kv_hint_sources": [source],
-                "kv_event_sources": [
-                    {
-                        "dp_rank": 0,
-                        "endpoint": "tcp://worker:24020",
-                        "topic": worker_raw_topic([source["cache_owner_id"]]),
-                        "block_size": 64,
-                        "format": "dynamo",
-                    }
-                ],
-            }
-        ]
-    )
-    values = {}
-    runtime = SimpleNamespace(
-        set_engine_specific=lambda key, value: values.update({key: json.loads(value)})
-    )
-    monkeypatch.setattr(register, "get_runtime_config", AsyncMock(return_value=runtime))
-    monkeypatch.setattr(register, "register_model", AsyncMock())
-    dynamo_args = SimpleNamespace(
-        use_sglang_tokenizer=False,
-        model_source_uri=None,
-        custom_jinja_template=None,
-        use_kv_events=True,
-        kv_state_endpoint=None,
-        namespace="ns",
-        component="backend",
-        endpoint="generate",
-    )
-    config = SimpleNamespace(
-        server_args=args,
-        dynamo_args=dynamo_args,
-        serving_mode=DisaggregationMode.AGGREGATED,
-    )
-    (descriptor,) = register.inventory_sources(engine).values()
-    assert descriptor == source
-    (attachment,) = state_agent_descriptors(engine, config)
-    assert (
-        attachment["router_hint_source"]["source_control_endpoint"]
-        == source["source_control_endpoint"]
-    )
-    asyncio.run(
-        register.register_model_with_readiness_gate(
-            engine,
-            None,
-            args,
-            dynamo_args,
-            worker_type=WorkerType.Aggregated,
-            forwards_kv_hints=True,
-        )
-    )
-    assert runtime.kv_event_source_mode == "state_agent_v2"
-    assert values[KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY] == {
-        "0": "tcp://worker:24100"
-    }
 
 
 @pytest.mark.parametrize(

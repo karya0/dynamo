@@ -2,17 +2,22 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from dynamo.common import kv_state_agent
-from dynamo.common.constants import DisaggregationMode
+from dynamo.common.constants import (
+    KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+    DisaggregationMode,
+)
+from dynamo.llm import WorkerType
 
 pytest.importorskip("sglang")
 
-from dynamo.sglang import state_agent  # noqa: E402
+from dynamo.sglang import register, state_agent  # noqa: E402
 from dynamo.sglang.state_agent import (  # noqa: E402
     StateAgentLifecycle,
     state_agent_descriptors,
@@ -117,6 +122,35 @@ def test_linker_descriptor_uses_reported_owner_endpoint_and_event_source():
     assert descriptor["router_hint_source"] == {
         "source_control_endpoint": "tcp://worker:24100",
         "worker_type": "aggregated",
+    }
+
+
+def test_linker_registration_uses_state_agent(monkeypatch):
+    engine, config, source, _ = linker_fixture()
+    config.server_args.model_path = config.server_args.served_model_name = "test-model"
+    config.dynamo_args.use_sglang_tokenizer = False
+    config.dynamo_args.model_source_uri = None
+    config.dynamo_args.custom_jinja_template = None
+    values = {}
+    runtime = SimpleNamespace(
+        set_engine_specific=lambda key, value: values.update({key: json.loads(value)})
+    )
+    monkeypatch.setattr(register, "get_runtime_config", AsyncMock(return_value=runtime))
+    monkeypatch.setattr(register, "register_model", AsyncMock())
+    assert list(register.inventory_sources(engine).values()) == [source]
+    asyncio.run(
+        register.register_model_with_readiness_gate(
+            engine,
+            None,
+            config.server_args,
+            config.dynamo_args,
+            worker_type=WorkerType.Aggregated,
+            forwards_kv_hints=True,
+        )
+    )
+    assert runtime.kv_event_source_mode == "state_agent_v2"
+    assert values[KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY] == {
+        "0": source["source_control_endpoint"]
     }
 
 
