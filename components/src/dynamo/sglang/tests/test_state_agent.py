@@ -554,7 +554,8 @@ def _serve_and_register(events):
 
 @pytest.mark.asyncio
 async def test_serve_starts_before_attach_and_register_follows_attach():
-    # init_decode and init_prefill both go through this helper.
+    # Helper-level only: init_decode/init_prefill call it, but their full
+    # init order is not exercised here.
     from dynamo.sglang.init_llm import _serve_attach_register
 
     events = []
@@ -617,3 +618,33 @@ async def test_handler_rejects_until_attached(role):
             pass
     handler.attach_gate.attached = True
     handler._raise_if_not_attached()
+
+
+def test_guard_mode_drops_generate_canary_payload():
+    from dynamo.sglang.init_llm import _guard_health_check_payload
+
+    payload = {"request": 1}
+    assert _guard_health_check_payload(SimpleNamespace(active=True), payload) is None
+    assert (
+        _guard_health_check_payload(SimpleNamespace(active=False), payload) is payload
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["load_lora", "unload_lora", "clear_kv_blocks"])
+async def test_mutating_control_methods_gated_until_attached(method):
+    from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
+
+    handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
+    handler.attach_gate = SimpleNamespace(attached=False)
+    with pytest.raises(HttpError):
+        async for _ in getattr(handler, method)({}):
+            pass
+    handler.attach_gate.attached = True
+    try:
+        async for _ in getattr(handler, method)({}):
+            pass
+    except HttpError:
+        pytest.fail("gate must pass once attached")
+    except Exception:  # noqa: BLE001 - bare handler; only the gate matters
+        pass

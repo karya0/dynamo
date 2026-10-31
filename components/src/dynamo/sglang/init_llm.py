@@ -70,6 +70,19 @@ def _freeze_gc_after_init(enabled: bool) -> None:
         logging.info("Froze SGLang worker GC objects after collecting %d", collected)
 
 
+def _guard_health_check_payload(state_agent, payload):
+    # The canary needs generate to work; in Guard mode the router cannot reach
+    # this worker until it is attached, so a canary would deadlock readiness.
+    if not state_agent.active:
+        return payload
+    logging.warning(
+        "Generate health-check canary is disabled in KVCR Guard mode because "
+        "readiness must not depend on generation before attachment "
+        "(DYN_HEALTH_CHECK_ENABLED is ignored for generate)"
+    )
+    return None
+
+
 async def _serve_attach_register(state_agent, serve_tasks, register_model):
     """Serve endpoints, then (Guard) await attachment, then register the model.
 
@@ -225,6 +238,9 @@ async def init_decode(
         await state_agent.start(engine, config, generate_endpoint)
         if state_agent.active:
             handler.attach_gate = state_agent
+        health_check_payload = _guard_health_check_payload(
+            state_agent, health_check_payload
+        )
         serve_tasks = [
             generate_endpoint.serve_endpoint(
                 handler.generate,
@@ -267,7 +283,7 @@ async def init_decode(
             ),
         )
     except Exception as e:
-        logging.error(f"Failed to serve endpoints: {e}")
+        logging.error(f"Failed to serve endpoints or attach to the KV state agent: {e}")
         raise
     else:
         body_failed = False
@@ -388,6 +404,9 @@ async def init_prefill(
         await state_agent.start(engine, config, generate_endpoint)
         if state_agent.active:
             handler.attach_gate = state_agent
+        health_check_payload = _guard_health_check_payload(
+            state_agent, health_check_payload
+        )
         serve_tasks = [
             generate_endpoint.serve_endpoint(
                 handler.generate,
@@ -438,7 +457,7 @@ async def init_prefill(
             ),
         )
     except Exception as e:
-        logging.error(f"Failed to serve endpoints: {e}")
+        logging.error(f"Failed to serve endpoints or attach to the KV state agent: {e}")
         raise
     else:
         body_failed = False

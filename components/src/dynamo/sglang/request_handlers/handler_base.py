@@ -162,6 +162,7 @@ class LoraMixin:
         This method is idempotent - concurrent calls for the same LoRA will be
         serialized and only one load operation will happen.
         """
+        self._raise_if_not_attached()
         try:
             if request is None:
                 yield {
@@ -408,6 +409,7 @@ class LoraMixin:
             "lora_name": str,
         }
         """
+        self._raise_if_not_attached()
         try:
             if request is None:
                 yield {
@@ -645,6 +647,7 @@ class BaseWorkerHandler(
 
     async def clear_kv_blocks(self, request: Optional[Dict[str, Any]] = None):
         """Flush SGLang's local cache when no requests are active."""
+        self._raise_if_not_attached()
         tokenizer_manager = (
             getattr(self.engine, "tokenizer_manager", None)
             if self.engine is not None
