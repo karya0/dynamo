@@ -9,7 +9,7 @@ import random
 import re
 import threading
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator, Dict, Generic, Optional, Tuple, TypeVar
+from typing import Any, AsyncIterator, Callable, Dict, Generic, Optional, Tuple, TypeVar
 
 import sglang as sgl
 from sglang.srt.managers.io_struct import ProfileReq
@@ -117,6 +117,7 @@ class LoraMixin:
     engine: sgl.Engine  # provided by BaseWorkerHandler
     config: Config
     generate_endpoint: Any
+    _raise_if_not_attached: Callable[[], None]  # provided by BaseWorkerHandler
 
     def _init_lora_tracking(self) -> None:
         """Initialize LoRA tracking state. Call from host __init__."""
@@ -917,6 +918,7 @@ class BaseWorkerHandler(
         """Add discovery synchronization to an SGLang route."""
 
         async def synchronized_handler(body: dict) -> dict:
+            self._raise_if_not_attached()
             return await self._invoke_engine_route(route_handler, body)
 
         return synchronized_handler

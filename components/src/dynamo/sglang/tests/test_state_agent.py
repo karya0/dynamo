@@ -620,14 +620,19 @@ async def test_handler_rejects_until_attached(role):
     handler._raise_if_not_attached()
 
 
-def test_guard_mode_drops_generate_canary_payload():
+@pytest.mark.parametrize(
+    "active,enabled,kept",
+    [(True, "true", False), (True, "false", True), (False, "true", True)],
+)
+def test_guard_canary_dropped_only_with_guard_and_health_check_enabled(
+    monkeypatch, active, enabled, kept
+):
     from dynamo.sglang.init_llm import _guard_health_check_payload
 
+    monkeypatch.setenv("DYN_HEALTH_CHECK_ENABLED", enabled)
     payload = {"request": 1}
-    assert _guard_health_check_payload(SimpleNamespace(active=True), payload) is None
-    assert (
-        _guard_health_check_payload(SimpleNamespace(active=False), payload) is payload
-    )
+    result = _guard_health_check_payload(SimpleNamespace(active=active), payload)
+    assert (result is payload) if kept else (result is None)
 
 
 @pytest.mark.asyncio
@@ -648,3 +653,16 @@ async def test_mutating_control_methods_gated_until_attached(method):
         pytest.fail("gate must pass once attached")
     except Exception:  # noqa: BLE001 - bare handler; only the gate matters
         pass
+
+
+@pytest.mark.asyncio
+async def test_engine_route_rejected_until_attached():
+    from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
+
+    handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
+    handler.attach_gate = SimpleNamespace(attached=False)
+    route = AsyncMock(return_value={"ok": True})
+    wrapped = handler._wrap_engine_route(route)
+    with pytest.raises(HttpError):
+        await wrapped({})
+    route.assert_not_awaited()

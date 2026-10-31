@@ -13,6 +13,7 @@ from sglang.srt.observability.trace import set_global_trace_level
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
+from dynamo.common.utils.env import env_bool
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
@@ -73,7 +74,9 @@ def _freeze_gc_after_init(enabled: bool) -> None:
 def _guard_health_check_payload(state_agent, payload):
     # The canary needs generate to work; in Guard mode the router cannot reach
     # this worker until it is attached, so a canary would deadlock readiness.
-    if not state_agent.active:
+    # With health checks off the runtime ignores the canary but a payload-less
+    # endpoint would never turn Ready, so keep the payload then.
+    if not state_agent.active or not env_bool("DYN_HEALTH_CHECK_ENABLED"):
         return payload
     logging.warning(
         "Generate health-check canary is disabled in KVCR Guard mode because "
