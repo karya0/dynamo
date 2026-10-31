@@ -600,26 +600,6 @@ async def test_attach_failure_fails_worker_without_registering_and_withdraws(
     owner.close.assert_awaited_once()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("role", ["decode", "prefill"])
-async def test_handler_rejects_until_attached(role):
-    from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
-    from dynamo.sglang.request_handlers.llm.prefill_handler import (
-        PrefillWorkerHandler,
-    )
-
-    cls = DecodeWorkerHandler if role == "decode" else PrefillWorkerHandler
-    handler = cls.__new__(cls)
-    # No lifecycle (non-Guard): never rejects.
-    handler._raise_if_not_attached()
-    handler.attach_gate = SimpleNamespace(attached=False)
-    with pytest.raises(HttpError):
-        async for _ in handler.generate({}, Mock()):
-            pass
-    handler.attach_gate.attached = True
-    handler._raise_if_not_attached()
-
-
 @pytest.mark.parametrize(
     "active,enabled,kept",
     [(True, "true", False), (True, "false", True), (False, "true", True)],
@@ -635,34 +615,71 @@ def test_guard_canary_dropped_only_with_guard_and_health_check_enabled(
     assert (result is payload) if kept else (result is None)
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("method", ["load_lora", "unload_lora", "clear_kv_blocks"])
-async def test_mutating_control_methods_gated_until_attached(method):
+def _handler(role):
     from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
+    from dynamo.sglang.request_handlers.llm.prefill_handler import (
+        PrefillWorkerHandler,
+    )
 
-    handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
-    handler.attach_gate = SimpleNamespace(attached=False)
-    with pytest.raises(HttpError):
-        async for _ in getattr(handler, method)({}):
+    cls = DecodeWorkerHandler if role == "decode" else PrefillWorkerHandler
+    return cls.__new__(cls)
+
+
+async def _drain(call):
+    result = call({})
+    if hasattr(result, "__aiter__"):
+        async for _ in result:
             pass
+    else:
+        await result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "role,method",
+    [
+        ("decode", "generate"),
+        ("prefill", "generate"),
+        ("decode", "load_lora"),
+        ("decode", "unload_lora"),
+        ("decode", "clear_kv_blocks"),
+        ("decode", "engine_route"),
+        ("decode", "weights_route"),
+    ],
+)
+async def test_gated_entrypoints_reject_until_attached(role, method):
+    handler = _handler(role)
+    # No lifecycle (non-Guard): never rejects.
+    handler._raise_if_not_attached()
+    handler.attach_gate = SimpleNamespace(attached=False)
+    inner = AsyncMock(return_value={"ok": True})
+    if method == "engine_route":
+        call = handler._wrap_engine_route(inner)
+    elif method == "weights_route":
+        call = handler._gate_route(inner)
+    elif method == "generate":
+        call = lambda body: handler.generate(body, Mock())  # noqa: E731
+    else:
+        call = getattr(handler, method)
+    with pytest.raises(HttpError):
+        await _drain(call)
+    inner.assert_not_awaited()
     handler.attach_gate.attached = True
     try:
-        async for _ in getattr(handler, method)({}):
-            pass
+        await _drain(call)
     except HttpError:
         pytest.fail("gate must pass once attached")
     except Exception:  # noqa: BLE001 - bare handler; only the gate matters
         pass
 
 
-@pytest.mark.asyncio
-async def test_engine_route_rejected_until_attached():
-    from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
-
-    handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
-    handler.attach_gate = SimpleNamespace(attached=False)
-    route = AsyncMock(return_value={"ok": True})
-    wrapped = handler._wrap_engine_route(route)
-    with pytest.raises(HttpError):
-        await wrapped({})
-    route.assert_not_awaited()
+def test_arm_closes_gate_before_start_only_for_guard_workers():
+    engine, config, _, _ = fixture()
+    guarded = StateAgentLifecycle()
+    guarded.arm(engine, config)
+    assert not guarded.attached
+    engine, config, _, info = fixture()
+    info["kv_hint_sources"] = []
+    plain = StateAgentLifecycle()
+    plain.arm(engine, config)
+    assert plain.attached

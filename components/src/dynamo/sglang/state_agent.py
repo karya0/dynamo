@@ -272,7 +272,17 @@ class StateAgentLifecycle:
         self._owner = None
         self._cleanup_task = None
         self._count = 0
-        self.attached = False
+        self._armed = False
+        self._attached = False
+
+    def arm(self, engine, config):
+        """Close the gate for a Guard worker before anything is served."""
+        self._armed = bool(state_agent_descriptors(engine, config))
+
+    @property
+    def attached(self):
+        # Non-Guard workers (never armed) are always open.
+        return not self._armed or self._attached
 
     @property
     def active(self):
@@ -294,13 +304,14 @@ class StateAgentLifecycle:
         # Keep the owner set so close() withdraws it on timeout or cancel.
         self._owner = owner
         self._count = len(descriptors)
+        self._armed = True
 
     async def await_attached(self):
         # Intent is not an attachment: fail closed until the agent subscribed.
         # Under Kubernetes discovery the intent is visible only once the worker
         # is Ready, so callers start serving before awaiting this.
         await self._owner.await_attached()
-        self.attached = True
+        self._attached = True
         logger.info("Attached %d KVCR inventory owners", self._count)
 
     async def _close_after_start(self, owner, startup):

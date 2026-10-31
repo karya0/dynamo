@@ -213,6 +213,11 @@ async def init_decode(
         enable_frontend_decoding=dynamo_args.frontend_decoding,
         first_token_source=first_token_source,
     )
+    # Close the attach gate before any route is registered: the system server
+    # is already up and routes must not act on an unattached Guard worker.
+    state_agent = StateAgentLifecycle()
+    state_agent.arm(engine, config)
+    handler.attach_gate = state_agent
     handler.register_engine_routes(runtime)
     if attached_engine is not None:
         handler.follow_shared_pause_state()
@@ -236,11 +241,8 @@ async def init_decode(
         )
 
     body_failed = True
-    state_agent = StateAgentLifecycle()
     try:
         await state_agent.start(engine, config, generate_endpoint)
-        if state_agent.active:
-            handler.attach_gate = state_agent
         health_check_payload = _guard_health_check_payload(
             state_agent, health_check_payload
         )
@@ -393,6 +395,11 @@ async def init_prefill(
     handler = PrefillWorkerHandler(
         engine, config, publisher, generate_endpoint, shutdown_event
     )
+    # Close the attach gate before any route is registered: the system server
+    # is already up and routes must not act on an unattached Guard worker.
+    state_agent = StateAgentLifecycle()
+    state_agent.arm(engine, config)
+    handler.attach_gate = state_agent
     handler.register_engine_routes(runtime)
     if attached_engine is not None:
         handler.follow_shared_pause_state()
@@ -402,11 +409,8 @@ async def init_prefill(
     ready_event = asyncio.Event()
 
     body_failed = True
-    state_agent = StateAgentLifecycle()
     try:
         await state_agent.start(engine, config, generate_endpoint)
-        if state_agent.active:
-            handler.attach_gate = state_agent
         health_check_payload = _guard_health_check_payload(
             state_agent, health_check_payload
         )

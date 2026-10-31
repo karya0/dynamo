@@ -914,6 +914,15 @@ class BaseWorkerHandler(
             finally:
                 await self._sync_discovery_with_sglang_pause_state()
 
+    def _gate_route(self, route_handler):
+        """Refuse a state-mutating control route until the worker is attached."""
+
+        async def gated_handler(body: dict) -> dict:
+            self._raise_if_not_attached()
+            return await route_handler(body)
+
+        return gated_handler
+
     def _wrap_engine_route(self, route_handler):
         """Add discovery synchronization to an SGLang route."""
 
@@ -936,18 +945,28 @@ class BaseWorkerHandler(
         built_in_routes = {
             "control/start_profile": self.start_profile,
             "control/stop_profile": self.stop_profile,
-            "control/update_weights_from_disk": self.update_weights_from_disk,
-            "control/update_weights_from_tensor": self.update_weights_from_tensor,
-            "control/update_weights_from_distributed": (
+            "control/update_weights_from_disk": self._gate_route(
+                self.update_weights_from_disk
+            ),
+            "control/update_weights_from_tensor": self._gate_route(
+                self.update_weights_from_tensor
+            ),
+            "control/update_weights_from_distributed": self._gate_route(
                 self.update_weights_from_distributed
             ),
-            "control/update_weights_from_ipc": self.update_weights_from_ipc,
-            "control/update_weight_version": self.update_weight_version,
+            "control/update_weights_from_ipc": self._gate_route(
+                self.update_weights_from_ipc
+            ),
+            "control/update_weight_version": self._gate_route(
+                self.update_weight_version
+            ),
         }
         # Register elastic-EP scaling only on workers whose engine can serve it
         # (see _supports_elastic_ep); the rest simply don't expose the route.
         if self._supports_elastic_ep():
-            built_in_routes["control/scale_elastic_ep"] = self.scale_elastic_ep
+            built_in_routes["control/scale_elastic_ep"] = self._gate_route(
+                self.scale_elastic_ep
+            )
             built_in_routes[
                 "control/is_scaling_elastic_ep"
             ] = self.is_scaling_elastic_ep
