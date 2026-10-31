@@ -271,6 +271,12 @@ class StateAgentLifecycle:
     def __init__(self):
         self._owner = None
         self._cleanup_task = None
+        self._count = 0
+        self.attached = False
+
+    @property
+    def active(self):
+        return self._owner is not None
 
     async def start(self, engine, config, endpoint):
         descriptors = state_agent_descriptors(engine, config)
@@ -285,11 +291,17 @@ class StateAgentLifecycle:
                 self._close_after_start(owner, startup)
             )
             raise
-        # Intent is not an attachment: fail closed until the agent subscribed.
         # Keep the owner set so close() withdraws it on timeout or cancel.
         self._owner = owner
-        await owner.await_attached()
-        logger.info("Attached %d KVCR inventory owners", len(descriptors))
+        self._count = len(descriptors)
+
+    async def await_attached(self):
+        # Intent is not an attachment: fail closed until the agent subscribed.
+        # Under Kubernetes discovery the intent is visible only once the worker
+        # is Ready, so callers start serving before awaiting this.
+        await self._owner.await_attached()
+        self.attached = True
+        logger.info("Attached %d KVCR inventory owners", self._count)
 
     async def _close_after_start(self, owner, startup):
         # Let the native binding initialize its OnceCell before withdrawal.

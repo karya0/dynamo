@@ -560,6 +560,13 @@ class BaseWorkerHandler(
     - Disaggregated serving support
     """
 
+    # StateAgentLifecycle in Guard mode; requests are refused until it is attached.
+    attach_gate = None
+
+    def _raise_if_not_attached(self) -> None:
+        if self.attach_gate is not None and not self.attach_gate.attached:
+            raise HttpError(503, "KV state agent attachment pending")
+
     def __init__(
         self,
         engine: sgl.Engine,

@@ -13,7 +13,7 @@ from dynamo.common.constants import (
     KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
     DisaggregationMode,
 )
-from dynamo.llm import WorkerType
+from dynamo.llm import HttpError, WorkerType
 
 pytest.importorskip("sglang")
 
@@ -418,12 +418,16 @@ async def test_start_waits_for_attach_ack(monkeypatch):
     monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", lambda *args: owner)
     lifecycle = StateAgentLifecycle()
     endpoint = SimpleNamespace(connection_id=lambda: 17)
-    task = asyncio.create_task(lifecycle.start(engine, config, endpoint))
-    await asyncio.sleep(0.05)
+    await lifecycle.start(engine, config, endpoint)
     owner.start.assert_awaited_once()
+    assert lifecycle.active
+    task = asyncio.create_task(lifecycle.await_attached())
+    await asyncio.sleep(0.05)
     assert not task.done()
+    assert not lifecycle.attached
     ack.set()
     await asyncio.wait_for(task, timeout=1)
+    assert lifecycle.attached
     await lifecycle.close()
     owner.close.assert_awaited_once()
 
@@ -438,8 +442,10 @@ async def test_ack_timeout_closes_retained_owner(monkeypatch):
     )
     monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", lambda *args: owner)
     lifecycle = StateAgentLifecycle()
+    await lifecycle.start(engine, config, SimpleNamespace(connection_id=lambda: 17))
     with pytest.raises(RuntimeError, match="did not acknowledge"):
-        await lifecycle.start(engine, config, SimpleNamespace(connection_id=lambda: 17))
+        await lifecycle.await_attached()
+    assert not lifecycle.attached
     assert lifecycle._owner is owner
     await lifecycle.close()
     owner.close.assert_awaited_once()
@@ -522,3 +528,92 @@ def test_cancelled_start_withdraws_registered_owner(monkeypatch, native_finished
         assert lifecycle._owner is None
 
     asyncio.run(exercise())
+
+
+class _Lifecycle:
+    def __init__(self, events, active=True, error=None):
+        self.events, self.active, self.error = events, active, error
+
+    async def await_attached(self):
+        self.events.append("await_attached")
+        await asyncio.sleep(0)
+        if self.error:
+            raise self.error
+
+
+def _serve_and_register(events):
+    async def serve():
+        events.append("serve")
+        await asyncio.sleep(0)
+
+    async def register():
+        events.append("register")
+
+    return [serve(), serve()], register
+
+
+@pytest.mark.asyncio
+async def test_serve_starts_before_attach_and_register_follows_attach():
+    # init_decode and init_prefill both go through this helper.
+    from dynamo.sglang.init_llm import _serve_attach_register
+
+    events = []
+    serve_tasks, register = _serve_and_register(events)
+    await _serve_attach_register(_Lifecycle(events), serve_tasks, register)
+    assert events == ["serve", "serve", "await_attached", "register"]
+
+
+@pytest.mark.asyncio
+async def test_non_guard_worker_registers_without_attach():
+    from dynamo.sglang.init_llm import _serve_attach_register
+
+    events = []
+    serve_tasks, register = _serve_and_register(events)
+    lifecycle = _Lifecycle(events, active=False)
+    await _serve_attach_register(lifecycle, serve_tasks, register)
+    assert "await_attached" not in events
+    assert events.count("register") == 1
+
+
+@pytest.mark.asyncio
+async def test_attach_failure_fails_worker_without_registering_and_withdraws(
+    monkeypatch,
+):
+    from dynamo.sglang.init_llm import _serve_attach_register
+
+    engine, config, _, _ = fixture()
+    owner = SimpleNamespace(
+        start=AsyncMock(),
+        await_attached=AsyncMock(side_effect=RuntimeError("did not acknowledge")),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", lambda *args: owner)
+    lifecycle = StateAgentLifecycle()
+    await lifecycle.start(engine, config, SimpleNamespace(connection_id=lambda: 17))
+    events = []
+    serve_tasks, register = _serve_and_register(events)
+    with pytest.raises(RuntimeError, match="did not acknowledge"):
+        await _serve_attach_register(lifecycle, serve_tasks, register)
+    assert "register" not in events
+    await lifecycle.close()
+    owner.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["decode", "prefill"])
+async def test_handler_rejects_until_attached(role):
+    from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
+    from dynamo.sglang.request_handlers.llm.prefill_handler import (
+        PrefillWorkerHandler,
+    )
+
+    cls = DecodeWorkerHandler if role == "decode" else PrefillWorkerHandler
+    handler = cls.__new__(cls)
+    # No lifecycle (non-Guard): never rejects.
+    handler._raise_if_not_attached()
+    handler.attach_gate = SimpleNamespace(attached=False)
+    with pytest.raises(HttpError):
+        async for _ in handler.generate({}, Mock()):
+            pass
+    handler.attach_gate.attached = True
+    handler._raise_if_not_attached()

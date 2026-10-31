@@ -70,6 +70,24 @@ def _freeze_gc_after_init(enabled: bool) -> None:
         logging.info("Froze SGLang worker GC objects after collecting %d", collected)
 
 
+async def _serve_attach_register(state_agent, serve_tasks, register_model):
+    """Serve endpoints, then (Guard) await attachment, then register the model.
+
+    Under Kubernetes discovery the worker's attachment intent is visible only
+    once it is Ready, which needs the endpoints serving; the model card (what
+    the router routes by) is published only after the agent attached.
+    """
+    if not state_agent.active:
+        await asyncio.gather(*serve_tasks, register_model())
+        return
+
+    async def attach_then_register():
+        await state_agent.await_attached()
+        await register_model()
+
+    await asyncio.gather(*serve_tasks, attach_then_register())
+
+
 async def init_decode(
     runtime: DistributedRuntime,
     config: Config,
@@ -205,7 +223,9 @@ async def init_decode(
     state_agent = StateAgentLifecycle()
     try:
         await state_agent.start(engine, config, generate_endpoint)
-        gather_tasks = [
+        if state_agent.active:
+            handler.attach_gate = state_agent
+        serve_tasks = [
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
@@ -228,7 +248,11 @@ async def init_decode(
                 handler.clear_kv_blocks,
                 metrics_labels=metrics_labels,
             ),
-            register_model_with_readiness_gate(
+        ]
+        await _serve_attach_register(
+            state_agent,
+            serve_tasks,
+            lambda: register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
                 server_args,
@@ -241,8 +265,7 @@ async def init_decode(
                 serves_lora_load=True,
                 forwards_kv_hints=True,
             ),
-        ]
-        await asyncio.gather(*gather_tasks)
+        )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
@@ -363,7 +386,9 @@ async def init_prefill(
     state_agent = StateAgentLifecycle()
     try:
         await state_agent.start(engine, config, generate_endpoint)
-        await asyncio.gather(
+        if state_agent.active:
+            handler.attach_gate = state_agent
+        serve_tasks = [
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
@@ -386,7 +411,11 @@ async def init_prefill(
                 handler.clear_kv_blocks,
                 metrics_labels=metrics_labels,
             ),
-            register_model_with_readiness_gate(
+        ]
+        await _serve_attach_register(
+            state_agent,
+            serve_tasks,
+            lambda: register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
                 server_args,
