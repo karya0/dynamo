@@ -726,3 +726,32 @@ async def test_arm_failure_logs_and_tears_down(caplog):
     deferred.assert_awaited_once()
     assert metrics_task.done()
     assert not hasattr(handler, "attach_gate")
+
+
+@pytest.mark.asyncio
+async def test_serve_failure_cancels_pending_attach_before_raising():
+    from dynamo.sglang.init_llm import _serve_attach_register
+
+    events = []
+
+    class Pending(_Lifecycle):
+        async def await_attached(self):
+            events.append("await_attached")
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                events.append("attach_cancelled")
+                raise
+
+    async def failing_serve():
+        await asyncio.sleep(0)
+        raise RuntimeError("serve failed")
+
+    async def register():
+        events.append("register")
+
+    with pytest.raises(RuntimeError, match="serve failed"):
+        await _serve_attach_register(Pending(events), [failing_serve()], register)
+    # Already cancelled and drained when the error reaches the caller.
+    assert "attach_cancelled" in events
+    assert "register" not in events

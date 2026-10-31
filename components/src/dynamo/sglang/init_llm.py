@@ -120,7 +120,16 @@ async def _serve_attach_register(state_agent, serve_tasks, register_model):
         await state_agent.await_attached()
         await register_model()
 
-    await asyncio.gather(*serve_tasks, attach_then_register())
+    # Drain every branch before an error reaches the teardown that withdraws
+    # the owner: a late ack must not open the gate or register the model then.
+    tasks = [asyncio.ensure_future(t) for t in serve_tasks]
+    tasks.append(asyncio.ensure_future(attach_then_register()))
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def init_decode(
