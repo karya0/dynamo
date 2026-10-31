@@ -531,8 +531,9 @@ def test_cancelled_start_withdraws_registered_owner(monkeypatch, native_finished
 
 
 class _Lifecycle:
-    def __init__(self, events, active=True, error=None):
-        self.events, self.active, self.error = events, active, error
+    def __init__(self, events, requires_attachment=True, error=None):
+        self.events, self.error = events, error
+        self.requires_attachment = requires_attachment
 
     async def await_attached(self):
         self.events.append("await_attached")
@@ -570,7 +571,7 @@ async def test_non_guard_worker_registers_without_attach():
 
     events = []
     serve_tasks, register = _serve_and_register(events)
-    lifecycle = _Lifecycle(events, active=False)
+    lifecycle = _Lifecycle(events, requires_attachment=False)
     await _serve_attach_register(lifecycle, serve_tasks, register)
     assert "await_attached" not in events
     assert events.count("register") == 1
@@ -600,18 +601,40 @@ async def test_attach_failure_fails_worker_without_registering_and_withdraws(
     owner.close.assert_awaited_once()
 
 
+def _armed(kind):
+    engine, config, _, info = {
+        "guard": guard_fixture,
+        "inventory": linker_fixture,
+        "none": fixture,
+    }[kind]()
+    if kind == "none":
+        info["kv_hint_sources"] = []
+    lifecycle = StateAgentLifecycle()
+    lifecycle.arm(engine, config)
+    return lifecycle
+
+
 @pytest.mark.parametrize(
-    "active,enabled,kept",
-    [(True, "true", False), (True, "false", True), (False, "true", True)],
+    "kind,enabled,kept",
+    [
+        ("guard", "true", False),
+        ("inventory", "true", False),
+        ("guard", "false", True),
+        ("inventory", "false", True),
+        ("none", "true", True),
+    ],
 )
-def test_guard_canary_dropped_only_with_guard_and_health_check_enabled(
-    monkeypatch, active, enabled, kept
+def test_canary_dropped_exactly_when_gate_armed_and_health_check_enabled(
+    monkeypatch, kind, enabled, kept
 ):
     from dynamo.sglang.init_llm import _guard_health_check_payload
 
     monkeypatch.setenv("DYN_HEALTH_CHECK_ENABLED", enabled)
+    lifecycle = _armed(kind)
+    assert lifecycle.requires_attachment == (kind != "none")
+    assert lifecycle.attached == (kind == "none")
     payload = {"request": 1}
-    result = _guard_health_check_payload(SimpleNamespace(active=active), payload)
+    result = _guard_health_check_payload(lifecycle, payload)
     assert (result is payload) if kept else (result is None)
 
 
@@ -673,7 +696,8 @@ async def test_gated_entrypoints_reject_until_attached(role, method):
         pass
 
 
-def test_arm_closes_gate_before_start_only_for_guard_workers():
+def test_arm_closes_gate_before_start_only_for_inventory_workers():
+    # Inventory-only (non-Guard) owners are gated too; no owner means open.
     engine, config, _, _ = fixture()
     guarded = StateAgentLifecycle()
     guarded.arm(engine, config)
@@ -683,3 +707,22 @@ def test_arm_closes_gate_before_start_only_for_guard_workers():
     plain = StateAgentLifecycle()
     plain.arm(engine, config)
     assert plain.attached
+
+
+@pytest.mark.asyncio
+async def test_arm_failure_logs_and_tears_down(caplog):
+    from dynamo.sglang.init_llm import _arm_attach_gate
+
+    engine, config, _, _ = linker_fixture()
+    config.server_args.tokenizer_worker_num = 2  # unsupported layout: arm raises
+    cleaned = []
+    deferred = AsyncMock()
+    handler = SimpleNamespace(cleanup=lambda: cleaned.append(True))
+    metrics_task = asyncio.ensure_future(asyncio.sleep(60))
+    with pytest.raises(ValueError):
+        await _arm_attach_gate(handler, engine, config, metrics_task, deferred)
+    assert "Failed to arm the KV state agent" in caplog.text
+    assert cleaned == [True]
+    deferred.assert_awaited_once()
+    assert metrics_task.done()
+    assert not hasattr(handler, "attach_gate")

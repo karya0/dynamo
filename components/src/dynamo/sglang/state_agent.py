@@ -285,6 +285,12 @@ class StateAgentLifecycle:
         return not self._armed or self._attached
 
     @property
+    def requires_attachment(self):
+        # Guard and process-local inventory owners alike publish an intent and
+        # wait for the agent's ack, so both are gated and lose the canary.
+        return self._armed
+
+    @property
     def active(self):
         return self._owner is not None
 

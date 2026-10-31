@@ -71,15 +71,34 @@ def _freeze_gc_after_init(enabled: bool) -> None:
         logging.info("Froze SGLang worker GC objects after collecting %d", collected)
 
 
+async def _arm_attach_gate(handler, engine, config, metrics_task, run_deferred):
+    """Create the lifecycle and close the handler's attach gate.
+
+    Misconfiguration raises here, before the serving try block, so tear down
+    the same way the serving failure path does.
+    """
+    state_agent = StateAgentLifecycle()
+    try:
+        state_agent.arm(engine, config)
+    except Exception as e:
+        logging.error(f"Failed to arm the KV state agent attach gate: {e}")
+        await finish_worker_teardown(
+            metrics_task, handler.cleanup, run_deferred, body_failed=True
+        )
+        raise
+    handler.attach_gate = state_agent
+    return state_agent
+
+
 def _guard_health_check_payload(state_agent, payload):
-    # The canary needs generate to work; in Guard mode the router cannot reach
-    # this worker until it is attached, so a canary would deadlock readiness.
+    # The canary needs generate to work; until the worker is attached its
+    # generate path is gated, so a canary would deadlock readiness.
     # With health checks off the runtime ignores the canary but a payload-less
     # endpoint would never turn Ready, so keep the payload then.
-    if not state_agent.active or not env_bool("DYN_HEALTH_CHECK_ENABLED"):
+    if not state_agent.requires_attachment or not env_bool("DYN_HEALTH_CHECK_ENABLED"):
         return payload
     logging.warning(
-        "Generate health-check canary is disabled in KVCR Guard mode because "
+        "Generate health-check canary is disabled for KV state-agent workers because "
         "readiness must not depend on generation before attachment "
         "(DYN_HEALTH_CHECK_ENABLED is ignored for generate)"
     )
@@ -93,7 +112,7 @@ async def _serve_attach_register(state_agent, serve_tasks, register_model):
     once it is Ready, which needs the endpoints serving; the model card (what
     the router routes by) is published only after the agent attached.
     """
-    if not state_agent.active:
+    if not state_agent.requires_attachment:
         await asyncio.gather(*serve_tasks, register_model())
         return
 
@@ -215,9 +234,9 @@ async def init_decode(
     )
     # Close the attach gate before any route is registered: the system server
     # is already up and routes must not act on an unattached Guard worker.
-    state_agent = StateAgentLifecycle()
-    state_agent.arm(engine, config)
-    handler.attach_gate = state_agent
+    state_agent = await _arm_attach_gate(
+        handler, engine, config, metrics_task, run_deferred_handlers
+    )
     handler.register_engine_routes(runtime)
     if attached_engine is not None:
         handler.follow_shared_pause_state()
@@ -397,9 +416,9 @@ async def init_prefill(
     )
     # Close the attach gate before any route is registered: the system server
     # is already up and routes must not act on an unattached Guard worker.
-    state_agent = StateAgentLifecycle()
-    state_agent.arm(engine, config)
-    handler.attach_gate = state_agent
+    state_agent = await _arm_attach_gate(
+        handler, engine, config, metrics_task, run_deferred_handlers
+    )
     handler.register_engine_routes(runtime)
     if attached_engine is not None:
         handler.follow_shared_pause_state()
