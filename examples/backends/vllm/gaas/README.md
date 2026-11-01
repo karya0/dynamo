@@ -1,0 +1,92 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
+# Guard as a Service
+
+**Experimental.** These templates wire a NVIDIA Dynamo worker to a separately
+managed KVCR holder. They are preparation inputs, not a validated GPU serving
+recipe. Do not deploy the unsubstituted templates.
+
+The node broker creates a holder Pod for a named pool. The holder owns and
+pre-touches its private memory-backed pool and runs the existing KVCR service.
+The init container requests that pool and writes its descriptor to an `emptyDir`.
+The worker connects directly to the holder's socket using KVCR's existing FD
+claim and recovery protocol. Its control listener advertises the holder's Pod IP,
+not the worker's IP. No host networking or shared PID namespace is used.
+
+## Preparation Inputs
+
+`guard-daemonset.yaml` contains a namespaced ServiceAccount, Role, RoleBinding
+and a node-pinned DaemonSet. `dgd.yaml` adds the worker init gate through
+`extraPodSpec`. `manifest-bundle.json` contains the same five resources for a
+stdlib-only preparation tool; the template-consistency test prevents drift.
+
+Render all of these variables before reviewing a deployment:
+
+| Variable | Meaning |
+| --- | --- |
+| `GAAS_NAME` | DNS-label deployment and manager identity |
+| `GAAS_NAMESPACE` | Existing namespace approved for this experiment |
+| `GAAS_NODE` | One approved node hostname |
+| `GAAS_SOCKET_ROOT` | Short private directory under `/node-shm`; all socket paths must fit Linux's 108-byte limit |
+| `GAAS_IMAGE` | Consumer image reference pinned by digest, including the matching KVCR and `dynamo.gaas` changes |
+| `GAAS_COMPATIBILITY_DIGEST` | Stable model, layout and cache-format compatibility identity |
+| `GAAS_MODEL`, `GAAS_MODEL_REVISION` | Reviewed model and immutable revision |
+| `GAAS_GPU_KV_BYTES`, `GAAS_MAX_MODEL_LEN` | Reviewed GPU KV-cache capacity and context limit |
+| `GAAS_CPU_PRIMARY_BYTES` | CPU primary-tier capacity; distinct from the holder's secondary-pool capacity |
+
+The sample claims pool `h7-pool-a` with 1 GiB of data. A separate 0.5 GiB claim
+can exercise independent reclamation. Each holder adds KVCR's 100 MiB journal
+and runtime headroom to its memory reservation. The service has one guard and
+the worker uses TP=PP=DP=1, guard index zero and private control port 55001.
+Runtime block layout comes from the worker's KV view stride, not the pool's
+capacity.
+
+## Claim and Launch
+
+The init gate calls `ensure_pool` with `pool_id`, `size_gb` and
+`compatibility_digest`. It accepts only a ready descriptor with matching
+identity, holder UID, holder IP and a service socket inside the broker directory.
+It atomically writes a mode-0600 descriptor. The main container mounts that
+descriptor read-only.
+
+The launcher requires the same identity and refuses conflicting existing
+offload settings. It passes the pinned vLLM tier schema through
+`--kv-transfer-config`: `OffloadingConnector`, `TieringOffloadingSpec` and one
+KVCR secondary tier. Existing state-agent and telemetry configuration is
+preserved. Complete routing, KV-event and workload configuration must still be
+validated for the intended serving test; no production routing behavior is
+established by these templates.
+
+## Release and Failure Handling
+
+Holders are label-managed and have no worker or DaemonSet owner reference.
+Worker exit leaves the pool reserved for reattachment. Explicit pool release
+asks the managing Guard to drain. The holder reservation remains until pending
+grants, primary leases and every external mapping are gone. Busy, failed or
+uncertain drain results retain it. Only terminal drain acknowledgement permits
+the broker's UID-preconditioned Pod deletion. Broker restart reconciles the
+persisted pool identity and release intent; it does not delete by timeout.
+
+This does not protect against administrator-forced deletion or node eviction.
+Teardown must drain workers and pools before removing the broker and its RBAC.
+Do not attach a garbage-collecting owner reference to holders.
+
+## Policy and Validation Scope
+
+The shared **socket directory** uses a `/dev/shm` hostPath. The worker never
+mounts the holder's backing file. PSA Baseline forbids Pod-spec hostPath volumes;
+this template is therefore not a Baseline-compatible delivery solution. A
+platform-managed device plugin or DRA/CDI directory mount requires separate
+implementation and runtime validation.
+
+CPU roles disable GPU visibility. The worker template requests one GPU only;
+deploy it through a reviewed namespace-fenced launcher after resource approval.
+No cluster or GPU run is required to execute the wrapper's unit tests.
+
+Build the consumer from the pinned Dynamo vLLM nightly and overlay only the new
+`dynamo/gaas` package plus the matching KVCR wheel. Preserve and validate the
+installed Dynamo native module and vLLM adapter hashes. The wrapper does not
+replace vLLM or rebuild native Dynamo.

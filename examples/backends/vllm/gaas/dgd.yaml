@@ -1,0 +1,164 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Experimental template; this requests one GPU only after explicit approval.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: ${GAAS_NAME}
+  namespace: ${GAAS_NAMESPACE}
+  annotations:
+    nvidia.com/dynamo-discovery-backend: kubernetes
+    nvidia.com/dynamo-kube-discovery-mode: container
+spec:
+  backendFramework: vllm
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      runtimeVersionOverride: "1.7.0"
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: ${GAAS_NODE}
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Equal
+            value: "true"
+            effect: NoSchedule
+        imagePullSecrets:
+          - name: nvcrimagepullsecret
+        mainContainer:
+          name: main
+          image: ${GAAS_IMAGE}
+          env:
+            - name: DYN_ROUTER_MODE
+              value: kv
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: void
+    VllmWorker:
+      componentType: worker
+      replicas: 1
+      runtimeVersionOverride: "1.7.0"
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: ${GAAS_NODE}
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Equal
+            value: "true"
+            effect: NoSchedule
+        imagePullSecrets:
+          - name: nvcrimagepullsecret
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          fsGroup: 1000
+          seccompProfile:
+            type: RuntimeDefault
+        initContainers:
+          - name: gaas-claim
+            image: ${GAAS_IMAGE}
+            command: [python3, -m, dynamo.gaas, init]
+            args:
+              - --broker-socket
+              - ${GAAS_SOCKET_ROOT}/broker.sock
+              - --claim-file
+              - /run/gaas/claim.json
+              - --pool-id
+              - h7-pool-a
+              - --size-gb
+              - "1.0"
+              - --compatibility-digest
+              - ${GAAS_COMPATIBILITY_DIGEST}
+            env:
+              - name: NVIDIA_VISIBLE_DEVICES
+                value: void
+              - name: CUDA_VISIBLE_DEVICES
+                value: ""
+            resources:
+              requests:
+                cpu: 100m
+                memory: 2Gi
+              limits:
+                cpu: "1"
+                memory: 2Gi
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop: [ALL]
+            volumeMounts:
+              - name: socket-directory
+                mountPath: /node-shm
+              - name: claim
+                mountPath: /run/gaas
+        mainContainer:
+          name: main
+          image: ${GAAS_IMAGE}
+          command: [python3, -m, dynamo.gaas, launch]
+          args:
+            - --broker-socket
+            - ${GAAS_SOCKET_ROOT}/broker.sock
+            - --claim-file
+            - /run/gaas/claim.json
+            - --pool-id
+            - h7-pool-a
+            - --size-gb
+            - "1.0"
+            - --compatibility-digest
+            - ${GAAS_COMPATIBILITY_DIGEST}
+            - --cpu-bytes
+            - "${GAAS_CPU_PRIMARY_BYTES}"
+            - --
+            - --model
+            - ${GAAS_MODEL}
+            - --revision
+            - ${GAAS_MODEL_REVISION}
+            - --tensor-parallel-size
+            - "1"
+            - --pipeline-parallel-size
+            - "1"
+            - --data-parallel-size
+            - "1"
+            - --kv-cache-memory-bytes
+            - "${GAAS_GPU_KV_BYTES}"
+            - --max-model-len
+            - "${GAAS_MAX_MODEL_LEN}"
+            - --max-num-seqs
+            - "1"
+            - --enable-prefix-caching
+          env:
+            - name: HF_HOME
+              value: /tmp/huggingface
+            - name: TRITON_CACHE_DIR
+              value: /tmp/triton
+            - name: TORCHINDUCTOR_CACHE_DIR
+              value: /tmp/torchinductor
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "8"
+              memory: 16Gi
+              nvidia.com/gpu: "1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: socket-directory
+              mountPath: /node-shm
+            - name: claim
+              mountPath: /run/gaas
+              readOnly: true
+        volumes:
+          - name: socket-directory
+            hostPath:
+              path: /dev/shm
+              type: Directory
+          - name: claim
+            emptyDir:
+              medium: Memory
+              sizeLimit: 1Mi
