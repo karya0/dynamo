@@ -113,6 +113,41 @@ def prepare_claim(
     return descriptor
 
 
+def _canonical_backend_args(argv: Sequence[str]) -> list[str]:
+    guarded = (
+        "--tensor-parallel-size",
+        "--pipeline-parallel-size",
+        "--data-parallel-size",
+        "--kv-transfer-config",
+    )
+    result = []
+    for argument in argv:
+        if argument == "--":
+            raise ValueError("GaaS backend arguments cannot contain another --")
+        option, separator, value = argument.partition("=")
+        root, dot, _ = option.partition(".")
+        if root.startswith("--"):
+            canonical = root.replace("_", "-")
+            if canonical == "--config":
+                raise ValueError(
+                    "GaaS requires explicit backend arguments, not --config"
+                )
+            if any(name.startswith(canonical) for name in guarded):
+                # vLLM appends dotted JSON after ordinary CLI values. Do not let
+                # it replace the validated configuration appended below.
+                if dot or canonical not in guarded:
+                    raise ValueError(
+                        "GaaS requires complete guarded option names and whole JSON"
+                    )
+                argument = canonical + separator + value
+        elif root in ("-t", "-p", "-d") or (
+            dot and any(root.startswith(alias) for alias in ("-tp", "-pp", "-dp"))
+        ):
+            raise ValueError("GaaS requires complete guarded short option names")
+        result.append(argument)
+    return result
+
+
 def _extract_transfer_config(argv: Sequence[str]) -> tuple[list[str], Claim]:
     remaining: list[str] = []
     config: Claim = {}
@@ -147,6 +182,7 @@ def launch_argv(
 ) -> list[str]:
     if isinstance(cpu_bytes, bool) or cpu_bytes <= 0:
         raise ValueError("cpu_bytes must be positive")
+    backend_args = _canonical_backend_args(backend_args)
     topology = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     for name, short in (
         ("tensor-parallel-size", "-tp"),
@@ -160,6 +196,8 @@ def launch_argv(
     remaining, config = _extract_transfer_config(backend_args)
     if config.get("kv_connector", "OffloadingConnector") != "OffloadingConnector":
         raise ValueError("GaaS requires OffloadingConnector")
+    if config.get("kv_connector_module_path") is not None:
+        raise ValueError("GaaS requires the built-in OffloadingConnector")
     if config.get("kv_role", "kv_both") != "kv_both":
         raise ValueError("GaaS requires kv_role=kv_both")
     extra = config.setdefault("kv_connector_extra_config", {})

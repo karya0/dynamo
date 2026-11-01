@@ -1,12 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import argparse
+import ast
+import hashlib
 import json
+import logging
 import os
 import re
 import stat
 import uuid
 from pathlib import Path
+from collections import defaultdict
+from typing import Any
 
 import jsonschema
 import pytest
@@ -153,6 +159,7 @@ def test_merge_preserves_user_settings(descriptor):
     "old",
     [
         {"kv_connector": "OtherConnector"},
+        {"kv_connector_module_path": "other_connector"},
         {"kv_role": "kv_producer"},
         {"kv_connector_extra_config": {"spec_name": "CPUOffloadingSpec"}},
         {"kv_connector_extra_config": {"cpu_bytes_to_use": 123}},
@@ -173,13 +180,161 @@ def test_merge_rejects_conflicts(descriptor, old):
     "args",
     [
         ["--tensor-parallel-size", "2"],
+        ["--tensor_parallel_size", "2"],
+        ["--tensor_parallel_size=2"],
         ["--pipeline-parallel-size=2"],
+        ["--pipeline_parallel_size=2"],
+        ["--data_parallel_size", "2"],
+        ["-pp=2"],
         ["-dp", "2"],
     ],
 )
 def test_reject_multi_worker_contract(descriptor, args):
     with pytest.raises(ValueError, match="TP=PP=DP=1"):
         launch_argv(descriptor, 4096, args)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--tensor-parallel-s", "2"],
+        ["--tensor_parallel_s=2"],
+        ["--pipeline-parallel-s=2"],
+        ["--data-parallel-s=2"],
+        ["-t", "2"],
+        ["--kv-transfer-conf", "{}"],
+        ["--kv-transfer-config.kv_connector", '"OtherConnector"'],
+        ["--kv_transfer_config.kv_connector=OtherConnector"],
+        ["--kv-transfer-c.kv_connector=OtherConnector"],
+        ["--kv-transfer-config.kv_connector_extra_config.spec_name=CPUOffloadingSpec"],
+        ["--config", "backend.yaml"],
+        ["--config=backend.yaml"],
+        ["--", "--tensor-parallel-size", "2"],
+    ],
+)
+def test_reject_unvalidated_native_argument_styles(descriptor, args):
+    with pytest.raises(ValueError, match="GaaS"):
+        launch_argv(descriptor, 4096, args)
+
+
+def test_normalize_guarded_names_without_changing_values(descriptor):
+    args = launch_argv(
+        descriptor,
+        4096,
+        [
+            "--model=org/model_with_underscores",
+            "--tensor_parallel_size=1",
+            "--kv_transfer_config",
+            '{"engine_id":"engine_with_underscores"}',
+            "--compilation_config.cudagraph_mode",
+            '"piecewise"',
+        ],
+    )
+    assert args[3:-2] == [
+        "--model=org/model_with_underscores",
+        "--tensor-parallel-size=1",
+        "--compilation_config.cudagraph_mode",
+        '"piecewise"',
+    ]
+    assert json.loads(args[-1])["engine_id"] == "engine_with_underscores"
+    assert args.count("--kv-transfer-config") == 1
+
+
+@pytest.fixture(scope="module")
+def pinned_native_parser():
+    """Exercise the parser from vLLM 5df63a7 without importing an engine."""
+    source_path = os.environ.get("GAAS_VLLM_ARGPARSE_SOURCE")
+    if source_path is None:
+        pytest.skip("set GAAS_VLLM_ARGPARSE_SOURCE to the pinned argparse_utils.py")
+    source = Path(source_path).read_bytes()
+    assert hashlib.sha256(source).hexdigest() == (
+        "d1330ebc9e8fc4ef0ff03a985b8bbf2551ca10780d427a830465a97253558a78"
+    )
+    tree = ast.parse(source)
+    parser_class = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "FlexibleArgumentParser"
+    )
+    parser_class.body = [
+        node
+        for node in parser_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "parse_args"
+    ]
+    integer_parser = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "human_readable_int"
+    )
+    namespace = {
+        "argparse": argparse,
+        "ArgumentParser": argparse.ArgumentParser,
+        "ArgumentTypeError": argparse.ArgumentTypeError,
+        "Namespace": argparse.Namespace,
+        "Any": Any,
+        "json": json,
+        "re": pytest.importorskip("regex"),
+        "sys": __import__("sys"),
+        "defaultdict": defaultdict,
+        "logger": logging.getLogger(__name__),
+    }
+    module = ast.Module(body=[integer_parser, parser_class], type_ignores=[])
+    exec(compile(ast.fix_missing_locations(module), source_path, "exec"), namespace)
+
+    def make_parser():
+        parser = namespace["FlexibleArgumentParser"]()
+        for name, short in (
+            ("tensor-parallel-size", "-tp"),
+            ("pipeline-parallel-size", "-pp"),
+            ("data-parallel-size", "-dp"),
+        ):
+            parser.add_argument(f"--{name}", short, type=int, default=1)
+        parser.add_argument("--kv-transfer-config", type=json.loads)
+        parser.add_argument("--model")
+        parser.add_argument("--compilation-config", type=json.loads)
+        return parser
+
+    return make_parser
+
+
+def test_pinned_native_parser_reproduces_reported_bypasses(pinned_native_parser):
+    assert (
+        pinned_native_parser()
+        .parse_args(["--tensor_parallel_size", "2"])
+        .tensor_parallel_size
+        == 2
+    )
+    parsed = pinned_native_parser().parse_args(
+        [
+            "--kv-transfer-config",
+            '{"kv_connector":"OffloadingConnector"}',
+            "--kv-transfer-config.kv_connector",
+            '"OtherConnector"',
+        ]
+    )
+    assert parsed.kv_transfer_config["kv_connector"] == "OtherConnector"
+
+
+@pytest.mark.parametrize(
+    "topology", [["--tensor_parallel_size=1"], ["-tp", "1"], ["-pp=1"]]
+)
+def test_pinned_native_parser_receives_one_validated_claim_config(
+    descriptor, pinned_native_parser, topology
+):
+    args = launch_argv(
+        descriptor,
+        4096,
+        [*topology, "--kv_transfer_config", '{"engine_id":"engine_with_underscores"}'],
+    )
+    native = pinned_native_parser().parse_args(args[3:])
+    assert native.tensor_parallel_size == native.pipeline_parallel_size == 1
+    assert native.data_parallel_size == 1
+    config = native.kv_transfer_config
+    assert config["kv_connector"] == "OffloadingConnector"
+    assert config["engine_id"] == "engine_with_underscores"
+    tier = config["kv_connector_extra_config"]["secondary_tiers"][0]
+    assert tier["compatibility_digest"] == descriptor["compatibility_digest"]
+    assert tier["control_advertise_host"] == descriptor["holder_pod_ip"]
 
 
 def test_launch_requires_gate_file(tmp_path, broker_socket):

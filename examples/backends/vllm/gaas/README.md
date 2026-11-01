@@ -60,6 +60,12 @@ preserved. Complete routing, KV-event and workload configuration must still be
 validated for the intended serving test; no production routing behavior is
 established by these templates.
 
+Protected options accept complete hyphenated or underscored names and the
+`-tp`, `-pp`, and `-dp` aliases. The launcher rejects their abbreviations,
+dotted transfer-config updates, custom connector modules, external `--config`
+files, and another backend `--` separator. Supply transfer settings as one
+whole JSON object so native parser preprocessing cannot override the claim.
+
 ## Release and Failure Handling
 
 Holders are label-managed and have no worker or DaemonSet owner reference.
