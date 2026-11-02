@@ -12,6 +12,7 @@ import sys
 import tempfile
 import uuid
 from collections.abc import Callable, Sequence
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +23,16 @@ EnsurePool = Callable[..., Claim]
 def claim_spec(pool_id: str, size_gb: float, compatibility_digest: str) -> Claim:
     if re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", pool_id) is None:
         raise ValueError("pool_id must be a DNS label")
-    if isinstance(size_gb, bool) or size_gb not in (0.5, 1.0):
-        raise ValueError("size_gb must be 0.5 or 1.0 for the single-worker recipe")
+    try:
+        size = Decimal(str(size_gb))
+    except InvalidOperation as error:
+        raise ValueError("invalid size_gb") from error
+    if (
+        not size.is_finite()
+        or not Decimal("0.5") <= size <= 12
+        or size != Decimal(int(size * 1024)) / 1024
+    ):
+        raise ValueError("size_gb must be 0.5 to 12 GiB in whole MiB")
     if not isinstance(compatibility_digest, str) or not compatibility_digest.strip():
         raise ValueError("compatibility_digest must be non-empty")
     return {

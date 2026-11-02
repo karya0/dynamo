@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import stat
+import subprocess
 import uuid
 from pathlib import Path
 from collections import defaultdict
@@ -27,6 +28,19 @@ from dynamo.gaas import (
 )
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.unit]
+
+
+@pytest.fixture(autouse=True)
+def no_external_commands(tmp_path, monkeypatch):
+    kubeconfig = tmp_path / "kubeconfig"
+    kubeconfig.write_text("")
+    monkeypatch.setenv("KUBECONFIG", str(kubeconfig))
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("unexpected external command")
+
+    monkeypatch.setattr(subprocess, "Popen", unexpected)
+    monkeypatch.setattr(os, "execv", unexpected)
 
 
 @pytest.fixture
@@ -59,7 +73,33 @@ def test_reject_bad_pool_id(pool_id):
         claim_spec(pool_id, 1.0, "digest")
 
 
-@pytest.mark.parametrize("size", [True, 0, 2, float("nan")])
+@pytest.mark.parametrize("size", [0.5, 0.5 + 1 / 1024, 1, 2, 12, "12"])
+def test_claim_capacity_roundtrips(size):
+    claim = claim_spec("pool", size, "digest")
+    assert json.loads(json.dumps(claim)) == {
+        "pool_id": "pool",
+        "size_gb": float(size),
+        "compatibility_digest": "digest",
+    }
+
+
+@pytest.mark.parametrize(
+    "size",
+    [
+        True,
+        False,
+        0,
+        -1,
+        0.5 - 1 / 1024,
+        12 + 1 / 1024,
+        1 + 1 / 2048,
+        float("nan"),
+        float("inf"),
+        -float("inf"),
+        "invalid",
+        None,
+    ],
+)
 def test_reject_unsupported_capacity(size):
     with pytest.raises(ValueError, match="size_gb"):
         claim_spec("pool", size, "digest")
@@ -88,9 +128,11 @@ def test_descriptor_fails_closed(claim, descriptor, broker_socket, key, value):
         validate_descriptor(descriptor, claim, broker_socket)
 
 
+@pytest.mark.parametrize("size_gb", [1.0, 12.0])
 def test_init_writes_atomic_private_descriptor(
-    tmp_path, claim, descriptor, broker_socket
+    tmp_path, claim, descriptor, broker_socket, size_gb
 ):
+    claim["size_gb"] = descriptor["size_gb"] = size_gb
     output = tmp_path / "claim" / "descriptor.json"
     calls = []
 
@@ -98,7 +140,27 @@ def test_init_writes_atomic_private_descriptor(
         calls.append((socket_path, request, timeout_s))
         return descriptor
 
-    prepare_claim(broker_socket, claim, output, 12, ensure)
+    assert (
+        main(
+            [
+                "init",
+                "--broker-socket",
+                broker_socket,
+                "--claim-file",
+                str(output),
+                "--pool-id",
+                claim["pool_id"],
+                "--size-gb",
+                str(size_gb),
+                "--compatibility-digest",
+                claim["compatibility_digest"],
+                "--timeout-s",
+                "12",
+            ],
+            ensure_pool=ensure,
+        )
+        == 0
+    )
     assert calls == [(broker_socket, claim, 12)]
     assert json.loads(output.read_text()) == descriptor
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
@@ -364,7 +426,11 @@ def test_launch_requires_gate_file(tmp_path, broker_socket):
         )
 
 
-def test_main_execs_without_shell(tmp_path, descriptor, broker_socket, monkeypatch):
+@pytest.mark.parametrize("size_gb", [1.0, 12.0])
+def test_main_execs_without_shell(
+    tmp_path, descriptor, broker_socket, monkeypatch, size_gb
+):
+    descriptor["size_gb"] = size_gb
     claim_file = tmp_path / "claim.json"
     claim_file.write_text(json.dumps(descriptor))
     calls = []
@@ -382,7 +448,7 @@ def test_main_execs_without_shell(tmp_path, descriptor, broker_socket, monkeypat
                 "--pool-id",
                 "pool-a",
                 "--size-gb",
-                "1",
+                str(size_gb),
                 "--compatibility-digest",
                 "model-layout-digest",
                 "--cpu-bytes",
