@@ -262,7 +262,7 @@ def main(argv: Sequence[str] | None = None, *, ensure_pool: EnsurePool) -> int:
         command_parser.add_argument("--broker-socket", required=True)
         command_parser.add_argument("--claim-file", type=Path, required=True)
         command_parser.add_argument("--pool-id", required=True)
-        command_parser.add_argument("--size-gb", type=float, required=True)
+        command_parser.add_argument("--size-gb", required=True)
         command_parser.add_argument("--compatibility-digest", required=True)
         if command == "init":
             command_parser.add_argument("--timeout-s", type=float, default=180)

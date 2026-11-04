@@ -128,7 +128,7 @@ def test_descriptor_fails_closed(claim, descriptor, broker_socket, key, value):
         validate_descriptor(descriptor, claim, broker_socket)
 
 
-@pytest.mark.parametrize("size_gb", [1.0, 12.0, 150.0])
+@pytest.mark.parametrize("size_gb", [1.0, 12.0, 150.0, 256.0])
 def test_init_writes_atomic_private_descriptor(
     tmp_path, claim, descriptor, broker_socket, size_gb
 ):
@@ -165,6 +165,36 @@ def test_init_writes_atomic_private_descriptor(
     assert json.loads(output.read_text()) == descriptor
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
     assert list(output.parent.iterdir()) == [output]
+
+
+@pytest.mark.parametrize("command", ["init", "launch"])
+@pytest.mark.parametrize("size_gb", ["256.00000000000001", "150.00000000000001"])
+def test_cli_rejects_capacity_before_float_rounding(
+    tmp_path, broker_socket, command, size_gb
+):
+    output = tmp_path / "claim.json"
+    args = [
+        command,
+        "--broker-socket",
+        broker_socket,
+        "--claim-file",
+        str(output),
+        "--pool-id",
+        "pool",
+        "--size-gb",
+        size_gb,
+        "--compatibility-digest",
+        "digest",
+    ]
+    if command == "launch":
+        args.extend(["--cpu-bytes", "64"])
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("invalid capacity reached the holder")
+
+    with pytest.raises(ValueError, match="whole MiB"):
+        main(args, ensure_pool=unexpected)
+    assert not output.exists()
 
 
 def test_rejected_init_does_not_replace_old_file(
