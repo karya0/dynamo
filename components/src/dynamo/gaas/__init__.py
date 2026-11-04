@@ -29,10 +29,10 @@ def claim_spec(pool_id: str, size_gb: float, compatibility_digest: str) -> Claim
         raise ValueError("invalid size_gb") from error
     if (
         not size.is_finite()
-        or not Decimal("0.5") <= size <= 12
+        or not Decimal("0.5") <= size <= 256
         or size != Decimal(int(size * 1024)) / 1024
     ):
-        raise ValueError("size_gb must be 0.5 to 12 GiB in whole MiB")
+        raise ValueError("size_gb must be 0.5 to 256 GiB in whole MiB")
     if not isinstance(compatibility_digest, str) or not compatibility_digest.strip():
         raise ValueError("compatibility_digest must be non-empty")
     return {

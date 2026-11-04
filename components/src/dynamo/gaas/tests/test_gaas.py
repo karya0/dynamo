@@ -73,7 +73,7 @@ def test_reject_bad_pool_id(pool_id):
         claim_spec(pool_id, 1.0, "digest")
 
 
-@pytest.mark.parametrize("size", [0.5, 0.5 + 1 / 1024, 1, 2, 12, "12"])
+@pytest.mark.parametrize("size", [0.5, 0.5 + 1 / 1024, 1, 2, 12, 150, 256, "256"])
 def test_claim_capacity_roundtrips(size):
     claim = claim_spec("pool", size, "digest")
     assert json.loads(json.dumps(claim)) == {
@@ -91,7 +91,7 @@ def test_claim_capacity_roundtrips(size):
         0,
         -1,
         0.5 - 1 / 1024,
-        12 + 1 / 1024,
+        256 + 1 / 1024,
         1 + 1 / 2048,
         float("nan"),
         float("inf"),
@@ -128,7 +128,7 @@ def test_descriptor_fails_closed(claim, descriptor, broker_socket, key, value):
         validate_descriptor(descriptor, claim, broker_socket)
 
 
-@pytest.mark.parametrize("size_gb", [1.0, 12.0])
+@pytest.mark.parametrize("size_gb", [1.0, 12.0, 150.0])
 def test_init_writes_atomic_private_descriptor(
     tmp_path, claim, descriptor, broker_socket, size_gb
 ):
