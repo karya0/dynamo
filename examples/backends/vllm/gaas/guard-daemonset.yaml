@@ -134,13 +134,18 @@ spec:
               value: void
             - name: CUDA_VISIBLE_DEVICES
               value: ""
+          # The supervisor commits one in-process pool per Guard rank at startup
+          # (journal 100 MiB + --pool-sizes-gb each, posix_fallocate into /node-shm,
+          # charged to this pod). Size the limit at guard-count x (pool size + 100 MiB)
+          # plus ~0.5 GiB. S3b: 1 rank x 1 GiB in 3Gi; S4 -r2 was OOMKilled with
+          # 2 ranks x 1.1 GiB in 2Gi.
           resources:
             requests:
               cpu: 200m
-              memory: 2Gi
+              memory: "${GAAS_SUPERVISOR_MEMORY}"
             limits:
               cpu: "1"
-              memory: 2Gi
+              memory: "${GAAS_SUPERVISOR_MEMORY}"
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

@@ -218,11 +218,11 @@
                 "resources": {
                   "requests": {
                     "cpu": "200m",
-                    "memory": "2Gi"
+                    "memory": "${GAAS_SUPERVISOR_MEMORY}"
                   },
                   "limits": {
                     "cpu": "1",
-                    "memory": "2Gi"
+                    "memory": "${GAAS_SUPERVISOR_MEMORY}"
                   }
                 },
                 "securityContext": {
