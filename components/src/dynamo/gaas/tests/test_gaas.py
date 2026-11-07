@@ -635,6 +635,7 @@ def test_rendered_dgd_matches_repository_crd_schema():
         "GAAS_POOL_SIZES_GB": "4",
         "GAAS_SLOT_CAP_BYTES": "4294967296",
         "GAAS_SUPERVISOR_MEMORY": "4Gi",
+        "GAAS_CLAIM_GB": "2",
     }
     rendered = re.sub(r"\$\{(GAAS_[A-Z_]+)\}", lambda m: variables[m[1]], source)
     dgd = json.loads(rendered)["resources"][-1]
@@ -1092,9 +1093,11 @@ def test_templates_render_string_args_for_numeric_looking_values():
         "GAAS_POOL_SIZES_GB": "4",
         "GAAS_SLOT_CAP_BYTES": "4294967296",
         "GAAS_SUPERVISOR_MEMORY": "4Gi",
+        "GAAS_CLAIM_GB": "2",
     }
     daemonset_text = (examples / "guard-daemonset.yaml").read_text()
     assert daemonset_text.count('memory: "${GAAS_SUPERVISOR_MEMORY}"') == 2
+    assert (examples / "dgd.yaml").read_text().count('"${GAAS_CLAIM_GB}"') == 8
 
     def render(text):
         return re.sub(r"\$\{(GAAS_[A-Z_]+)\}", lambda m: variables[m[1]], text)

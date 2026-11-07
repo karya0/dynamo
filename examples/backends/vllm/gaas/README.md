@@ -49,6 +49,7 @@ Render all of these variables before reviewing a deployment:
 | `GAAS_SLOT_CAP_BYTES` | Supervisor `--slot-cap-bytes`, the node's slot capacity |
 | `GAAS_CPU_PRIMARY_BYTES` | CPU primary-tier capacity; distinct from the holder's secondary-pool capacity |
 | `GAAS_SUPERVISOR_MEMORY` | `kvcr-service` container memory request and limit (required, no default; the render raises KeyError if unset). The supervisor commits one in-process pool per Guard rank at startup, charged to this pod, so size it at guard-count x (pool size + 100 MiB) plus ~0.5 GiB: e.g. `4Gi` for guard-count 2 with 1 GiB pools, ~`104Gi` for 50 GiB pools |
+| `GAAS_CLAIM_GB` | v2 claim size, used for both `--minimum-gb` and `--maximum-gb` of every `gaas-claim` init container and worker. GiB (binary, same unit as `--pool-sizes-gb`); on the S4b path set it to `GAAS_CPU_PRIMARY_BYTES` / 2^30 so the grant equals the engine's CPU pool exactly; partial grants are refused |
 
 The sample claims pool `h7-pool-a` with 1 GiB of data. A separate 0.5 GiB claim
 can exercise independent reclamation. Each holder adds KVCR's 100 MiB journal

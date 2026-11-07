@@ -74,9 +74,9 @@ spec:
               - --lineage
               - "${GAAS_NAME}"
               - --minimum-gb
-              - "0.5"
+              - "${GAAS_CLAIM_GB}"
               - --maximum-gb
-              - "2.0"
+              - "${GAAS_CLAIM_GB}"
               - --state-agent-namespace
               - "${GAAS_NAMESPACE}-${GAAS_NAME}"
               - --guard-index
@@ -122,9 +122,9 @@ spec:
             - --lineage
             - "${GAAS_NAME}"
             - --minimum-gb
-            - "0.5"
+            - "${GAAS_CLAIM_GB}"
             - --maximum-gb
-            - "2.0"
+            - "${GAAS_CLAIM_GB}"
             - --state-agent-namespace
             - "${GAAS_NAMESPACE}-${GAAS_NAME}"
             - --guard-index
@@ -241,9 +241,9 @@ spec:
               - --lineage
               - "${GAAS_NAME}"
               - --minimum-gb
-              - "0.5"
+              - "${GAAS_CLAIM_GB}"
               - --maximum-gb
-              - "2.0"
+              - "${GAAS_CLAIM_GB}"
               - --state-agent-namespace
               - "${GAAS_NAMESPACE}-${GAAS_NAME}"
               - --guard-index
@@ -289,9 +289,9 @@ spec:
             - --lineage
             - "${GAAS_NAME}"
             - --minimum-gb
-            - "0.5"
+            - "${GAAS_CLAIM_GB}"
             - --maximum-gb
-            - "2.0"
+            - "${GAAS_CLAIM_GB}"
             - --state-agent-namespace
             - "${GAAS_NAMESPACE}-${GAAS_NAME}"
             - --guard-index
