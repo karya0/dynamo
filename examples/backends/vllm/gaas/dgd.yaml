@@ -77,6 +77,8 @@ spec:
               - "0.5"
               - --maximum-gb
               - "2.0"
+              - --state-agent-namespace
+              - ${GAAS_NAMESPACE}-${GAAS_NAME}
               - --service-socket
               - ${GAAS_SOCKET_ROOT}/service.sock
             env:
@@ -121,6 +123,8 @@ spec:
             - "0.5"
             - --maximum-gb
             - "2.0"
+            - --state-agent-namespace
+            - ${GAAS_NAMESPACE}-${GAAS_NAME}
             - --service-socket
             - ${GAAS_SOCKET_ROOT}/service.sock
             - --cpu-bytes

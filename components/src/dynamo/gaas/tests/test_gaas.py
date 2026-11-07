@@ -553,6 +553,8 @@ def test_rendered_dgd_matches_repository_crd_schema():
         "GAAS_CPU_PRIMARY_BYTES": "67108864",
         "GAAS_GPU_KV_BYTES": "268435456",
         "GAAS_MAX_MODEL_LEN": "8192",
+        "GAAS_POOL_SIZES_GB": "4",
+        "GAAS_SLOT_CAP_BYTES": "4294967296",
     }
     rendered = re.sub(r"\$\{(GAAS_[A-Z_]+)\}", lambda m: variables[m[1]], source)
     dgd = json.loads(rendered)["resources"][-1]
