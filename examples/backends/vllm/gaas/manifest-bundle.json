@@ -104,6 +104,8 @@
               }
             },
             "hostPID": true,
+            "hostNetwork": true,
+            "dnsPolicy": "ClusterFirstWithHostNet",
             "initContainers": [
               {
                 "name": "prepare-dirs",
@@ -160,7 +162,7 @@
                   "--pool-dir",
                   "${GAAS_SOCKET_ROOT}/pools",
                   "--guard-count",
-                  "1",
+                  "2",
                   "--pool-sizes-gb",
                   "${GAAS_POOL_SIZES_GB}",
                   "--compatibility-digest",
@@ -193,6 +195,14 @@
                     }
                   },
                   {
+                    "name": "KVCR_ADVERTISE_HOST",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "fieldPath": "status.hostIP"
+                      }
+                    }
+                  },
+                  {
                     "name": "NVIDIA_VISIBLE_DEVICES",
                     "value": "void"
                   },
@@ -216,6 +226,9 @@
                   "capabilities": {
                     "drop": [
                       "ALL"
+                    ],
+                    "add": [
+                      "IPC_LOCK"
                     ]
                   }
                 },
@@ -291,7 +304,7 @@
               }
             }
           },
-          "VllmWorker": {
+          "VllmWorkerA": {
             "componentType": "worker",
             "replicas": 1,
             "runtimeVersionOverride": "1.7.0",
@@ -350,6 +363,8 @@
                     "2.0",
                     "--state-agent-namespace",
                     "${GAAS_NAMESPACE}-${GAAS_NAME}",
+                    "--guard-index",
+                    "0",
                     "--service-socket",
                     "${GAAS_SOCKET_ROOT}/service.sock"
                   ],
@@ -421,6 +436,9 @@
                   "2.0",
                   "--state-agent-namespace",
                   "${GAAS_NAMESPACE}-${GAAS_NAME}",
+                  "--guard-index",
+                  "0",
+                  "--state-agent",
                   "--service-socket",
                   "${GAAS_SOCKET_ROOT}/service.sock",
                   "--cpu-bytes",
@@ -442,9 +460,19 @@
                   "${GAAS_MAX_MODEL_LEN}",
                   "--max-num-seqs",
                   "1",
-                  "--enable-prefix-caching"
+                  "--enable-prefix-caching",
+                  "--kv-events-config",
+                  "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:23080\",\"enable_kv_cache_events\":true}"
                 ],
                 "env": [
+                  {
+                    "name": "GAAS_ADVERTISE_HOST",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "fieldPath": "status.hostIP"
+                      }
+                    }
+                  },
                   {
                     "name": "HF_HOME",
                     "value": "/tmp/huggingface"
@@ -506,6 +534,280 @@
                   }
                 }
               ]
+            }
+          },
+          "VllmWorkerB": {
+            "componentType": "worker",
+            "replicas": 1,
+            "runtimeVersionOverride": "1.7.0",
+            "extraPodSpec": {
+              "nodeSelector": {
+                "kubernetes.io/hostname": "${GAAS_NODE}"
+              },
+              "tolerations": [
+                {
+                  "key": "nvidia.com/gpu",
+                  "operator": "Equal",
+                  "value": "true",
+                  "effect": "NoSchedule"
+                }
+              ],
+              "imagePullSecrets": [
+                {
+                  "name": "nvcrimagepullsecret"
+                }
+              ],
+              "securityContext": {
+                "runAsNonRoot": true,
+                "runAsUser": 1000,
+                "runAsGroup": 1000,
+                "fsGroup": 1000,
+                "seccompProfile": {
+                  "type": "RuntimeDefault"
+                }
+              },
+              "initContainers": [
+                {
+                  "name": "gaas-claim",
+                  "image": "${GAAS_IMAGE}",
+                  "command": [
+                    "python3",
+                    "-m",
+                    "dynamo.gaas",
+                    "init"
+                  ],
+                  "args": [
+                    "--claim-file",
+                    "/run/gaas/claim.json",
+                    "--pool-id",
+                    "h7-pool-a",
+                    "--size-gb",
+                    "1.0",
+                    "--compatibility-digest",
+                    "${GAAS_COMPATIBILITY_DIGEST}",
+                    "--tenant",
+                    "${GAAS_NAME}",
+                    "--lineage",
+                    "${GAAS_NAME}",
+                    "--minimum-gb",
+                    "0.5",
+                    "--maximum-gb",
+                    "2.0",
+                    "--state-agent-namespace",
+                    "${GAAS_NAMESPACE}-${GAAS_NAME}",
+                    "--guard-index",
+                    "1",
+                    "--service-socket",
+                    "${GAAS_SOCKET_ROOT}/service.sock"
+                  ],
+                  "env": [
+                    {
+                      "name": "NVIDIA_VISIBLE_DEVICES",
+                      "value": "void"
+                    },
+                    {
+                      "name": "CUDA_VISIBLE_DEVICES",
+                      "value": ""
+                    }
+                  ],
+                  "resources": {
+                    "requests": {
+                      "cpu": "100m",
+                      "memory": "2Gi"
+                    },
+                    "limits": {
+                      "cpu": "1",
+                      "memory": "2Gi"
+                    }
+                  },
+                  "securityContext": {
+                    "allowPrivilegeEscalation": false,
+                    "capabilities": {
+                      "drop": [
+                        "ALL"
+                      ]
+                    }
+                  },
+                  "volumeMounts": [
+                    {
+                      "name": "socket-directory",
+                      "mountPath": "/node-shm"
+                    },
+                    {
+                      "name": "claim",
+                      "mountPath": "/run/gaas"
+                    }
+                  ]
+                }
+              ],
+              "mainContainer": {
+                "name": "main",
+                "image": "${GAAS_IMAGE}",
+                "command": [
+                  "python3",
+                  "-m",
+                  "dynamo.gaas",
+                  "launch"
+                ],
+                "args": [
+                  "--claim-file",
+                  "/run/gaas/claim.json",
+                  "--pool-id",
+                  "h7-pool-a",
+                  "--size-gb",
+                  "1.0",
+                  "--compatibility-digest",
+                  "${GAAS_COMPATIBILITY_DIGEST}",
+                  "--tenant",
+                  "${GAAS_NAME}",
+                  "--lineage",
+                  "${GAAS_NAME}",
+                  "--minimum-gb",
+                  "0.5",
+                  "--maximum-gb",
+                  "2.0",
+                  "--state-agent-namespace",
+                  "${GAAS_NAMESPACE}-${GAAS_NAME}",
+                  "--guard-index",
+                  "1",
+                  "--state-agent",
+                  "--service-socket",
+                  "${GAAS_SOCKET_ROOT}/service.sock",
+                  "--cpu-bytes",
+                  "${GAAS_CPU_PRIMARY_BYTES}",
+                  "--",
+                  "--model",
+                  "${GAAS_MODEL}",
+                  "--revision",
+                  "${GAAS_MODEL_REVISION}",
+                  "--tensor-parallel-size",
+                  "1",
+                  "--pipeline-parallel-size",
+                  "1",
+                  "--data-parallel-size",
+                  "1",
+                  "--kv-cache-memory-bytes",
+                  "${GAAS_GPU_KV_BYTES}",
+                  "--max-model-len",
+                  "${GAAS_MAX_MODEL_LEN}",
+                  "--max-num-seqs",
+                  "1",
+                  "--enable-prefix-caching",
+                  "--kv-events-config",
+                  "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:23080\",\"enable_kv_cache_events\":true}"
+                ],
+                "env": [
+                  {
+                    "name": "GAAS_ADVERTISE_HOST",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "fieldPath": "status.hostIP"
+                      }
+                    }
+                  },
+                  {
+                    "name": "HF_HOME",
+                    "value": "/tmp/huggingface"
+                  },
+                  {
+                    "name": "TRITON_CACHE_DIR",
+                    "value": "/tmp/triton"
+                  },
+                  {
+                    "name": "TORCHINDUCTOR_CACHE_DIR",
+                    "value": "/tmp/torchinductor"
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "4",
+                    "memory": "16Gi",
+                    "nvidia.com/gpu": "1"
+                  },
+                  "limits": {
+                    "cpu": "8",
+                    "memory": "16Gi",
+                    "nvidia.com/gpu": "1"
+                  }
+                },
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "name": "socket-directory",
+                    "mountPath": "/node-shm"
+                  },
+                  {
+                    "name": "claim",
+                    "mountPath": "/run/gaas",
+                    "readOnly": true
+                  }
+                ]
+              },
+              "volumes": [
+                {
+                  "name": "socket-directory",
+                  "hostPath": {
+                    "path": "/dev/shm",
+                    "type": "Directory"
+                  }
+                },
+                {
+                  "name": "claim",
+                  "emptyDir": {
+                    "medium": "Memory",
+                    "sizeLimit": "1Mi"
+                  }
+                }
+              ]
+            }
+          },
+          "KvStateAgent": {
+            "componentType": "worker",
+            "replicas": 1,
+            "runtimeVersionOverride": "1.7.0",
+            "extraPodSpec": {
+              "nodeSelector": {
+                "kubernetes.io/hostname": "${GAAS_NODE}"
+              },
+              "imagePullSecrets": [
+                {
+                  "name": "nvcrimagepullsecret"
+                }
+              ],
+              "mainContainer": {
+                "name": "main",
+                "image": "${GAAS_IMAGE}",
+                "command": [
+                  "python3",
+                  "-m",
+                  "dynamo.kv_state_agent"
+                ],
+                "args": [
+                  "--max-slots",
+                  "2"
+                ],
+                "env": [
+                  {
+                    "name": "DYN_COMPONENT",
+                    "value": "kv_state_agent"
+                  },
+                  {
+                    "name": "DYN_HEALTH_CHECK_ENABLED",
+                    "value": "false"
+                  },
+                  {
+                    "name": "NVIDIA_VISIBLE_DEVICES",
+                    "value": "void"
+                  }
+                ]
+              }
             }
           }
         }

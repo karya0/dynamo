@@ -45,14 +45,14 @@ Render all of these variables before reviewing a deployment:
 | `GAAS_COMPATIBILITY_DIGEST` | Stable model, layout and cache-format compatibility identity |
 | `GAAS_MODEL`, `GAAS_MODEL_REVISION` | Reviewed model and immutable revision |
 | `GAAS_GPU_KV_BYTES`, `GAAS_MAX_MODEL_LEN` | Reviewed GPU KV-cache capacity and context limit |
-| `GAAS_POOL_SIZES_GB` | Supervisor `--pool-sizes-gb` for its one Guard pool |
+| `GAAS_POOL_SIZES_GB` | Supervisor `--pool-sizes-gb` (the pool layout; the supervisor runs two Guards, `--guard-count 2`) |
 | `GAAS_SLOT_CAP_BYTES` | Supervisor `--slot-cap-bytes`, the node's slot capacity |
 | `GAAS_CPU_PRIMARY_BYTES` | CPU primary-tier capacity; distinct from the holder's secondary-pool capacity |
 
 The sample claims pool `h7-pool-a` with 1 GiB of data. A separate 0.5 GiB claim
 can exercise independent reclamation. Each holder adds KVCR's 100 MiB journal
 and runtime headroom to its memory reservation. The service has one guard and
-the worker uses TP=PP=DP=1, guard index zero and private control port 55001.
+each of the two workers (`VllmWorkerA`, `VllmWorkerB`) uses TP=PP=DP=1 and its own Guard: `--guard-index N` and control port `55001 + N` (override with `--control-port`). The DaemonSet runs on the host network and the workers advertise the node's address through `GAAS_ADVERTISE_HOST` (`--advertise-host`); a v2 launch exits without it. `--state-agent` attaches each worker to the `KvStateAgent` service.
 Runtime block layout comes from the worker's KV view stride, not the pool's
 capacity.
 

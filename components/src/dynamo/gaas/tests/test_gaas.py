@@ -556,11 +556,40 @@ def test_canonical_templates_match_yaml_and_single_worker_contract():
         {"name": "NVIDIA_VISIBLE_DEVICES", "value": "void"},
         {"name": "CUDA_VISIBLE_DEVICES", "value": ""},
     ]
-    worker = yaml_resources[4]["spec"]["services"]["VllmWorker"]["extraPodSpec"]
-    assert worker["mainContainer"]["resources"]["limits"]["nvidia.com/gpu"] == "1"
-    assert "nvidia.com/gpu" not in worker["initContainers"][0]["resources"]["limits"]
-    assert all("hostNetwork" not in pod for pod in (guard, worker))
-    assert worker["mainContainer"]["volumeMounts"][-1]["readOnly"] is True
+    services = yaml_resources[4]["spec"]["services"]
+    assert guard["hostNetwork"] is True
+    assert guard["dnsPolicy"] == "ClusterFirstWithHostNet"
+    supervisor = guard["containers"][0]
+    assert supervisor["securityContext"]["capabilities"] == {
+        "drop": ["ALL"],
+        "add": ["IPC_LOCK"],
+    }
+    assert {
+        "name": "KVCR_ADVERTISE_HOST",
+        "valueFrom": {"fieldRef": {"fieldPath": "status.hostIP"}},
+    } in supervisor["env"]
+    assert supervisor["args"][supervisor["args"].index("--guard-count") + 1] == "2"
+    assert services["KvStateAgent"]["extraPodSpec"]["mainContainer"]["command"] == [
+        "python3",
+        "-m",
+        "dynamo.kv_state_agent",
+    ]
+    for index, name in enumerate(("VllmWorkerA", "VllmWorkerB")):
+        service = services[name]
+        assert service["replicas"] == 1
+        worker = service["extraPodSpec"]
+        main = worker["mainContainer"]
+        assert main["resources"]["limits"]["nvidia.com/gpu"] == "1"
+        assert "nvidia.com/gpu" not in worker["initContainers"][0]["resources"]["limits"]
+        assert "hostNetwork" not in worker
+        assert main["volumeMounts"][-1]["readOnly"] is True
+        assert {
+            "name": "GAAS_ADVERTISE_HOST",
+            "valueFrom": {"fieldRef": {"fieldPath": "status.hostIP"}},
+        } in main["env"]
+        for args in (worker["initContainers"][0]["args"], main["args"]):
+            assert args[args.index("--guard-index") + 1] == str(index)
+        assert "--state-agent" in main["args"]
 
 
 def test_rendered_dgd_matches_repository_crd_schema():
