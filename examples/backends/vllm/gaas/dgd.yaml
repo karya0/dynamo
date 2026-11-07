@@ -5,8 +5,8 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: ${GAAS_NAME}
-  namespace: ${GAAS_NAMESPACE}
+  name: "${GAAS_NAME}"
+  namespace: "${GAAS_NAMESPACE}"
   annotations:
     nvidia.com/dynamo-discovery-backend: kubernetes
     nvidia.com/dynamo-kube-discovery-mode: container
@@ -19,7 +19,7 @@ spec:
       runtimeVersionOverride: "1.7.0"
       extraPodSpec:
         nodeSelector:
-          kubernetes.io/hostname: ${GAAS_NODE}
+          kubernetes.io/hostname: "${GAAS_NODE}"
         tolerations:
           - key: nvidia.com/gpu
             operator: Equal
@@ -41,7 +41,7 @@ spec:
       runtimeVersionOverride: "1.7.0"
       extraPodSpec:
         nodeSelector:
-          kubernetes.io/hostname: ${GAAS_NODE}
+          kubernetes.io/hostname: "${GAAS_NODE}"
         tolerations:
           - key: nvidia.com/gpu
             operator: Equal
