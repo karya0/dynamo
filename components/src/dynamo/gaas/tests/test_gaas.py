@@ -594,7 +594,10 @@ def test_canonical_templates_match_yaml_and_single_worker_contract():
             "name": "POD_IP",
             "valueFrom": {"fieldRef": {"fieldPath": "status.podIP"}},
         } in main["env"]
-        assert {"name": "KVCR_LOG_LEVEL", "value": "DEBUG"} in main["env"]
+        assert {
+            "name": "DYN_LOG",
+            "value": "info,remote_fw_dram=debug,remote_ops=debug",
+        } in main["env"]
     agent = services["KvStateAgent"]["extraPodSpec"]
     assert agent["tolerations"] == [
         {
@@ -608,6 +611,9 @@ def test_canonical_templates_match_yaml_and_single_worker_contract():
         "limits", {}
     )
     assert {"name": "KVCR_LOG_LEVEL", "value": "DEBUG"} in supervisor["env"]
+    agent_env = agent["mainContainer"]["env"]
+    assert {"name": "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", "value": ""} in agent_env
+    assert {"name": "DYN_LOG", "value": "debug"} in agent_env
 
 
 def test_rendered_dgd_matches_repository_crd_schema():

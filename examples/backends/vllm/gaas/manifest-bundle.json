@@ -486,8 +486,8 @@
                     }
                   },
                   {
-                    "name": "KVCR_LOG_LEVEL",
-                    "value": "DEBUG"
+                    "name": "DYN_LOG",
+                    "value": "info,remote_fw_dram=debug,remote_ops=debug"
                   },
                   {
                     "name": "HF_HOME",
@@ -730,8 +730,8 @@
                     }
                   },
                   {
-                    "name": "KVCR_LOG_LEVEL",
-                    "value": "DEBUG"
+                    "name": "DYN_LOG",
+                    "value": "info,remote_fw_dram=debug,remote_ops=debug"
                   },
                   {
                     "name": "HF_HOME",
@@ -833,6 +833,14 @@
                   {
                     "name": "DYN_COMPONENT",
                     "value": "kv_state_agent"
+                  },
+                  {
+                    "name": "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
+                    "value": ""
+                  },
+                  {
+                    "name": "DYN_LOG",
+                    "value": "debug"
                   },
                   {
                     "name": "DYN_HEALTH_CHECK_ENABLED",

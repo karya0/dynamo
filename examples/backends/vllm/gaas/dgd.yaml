@@ -163,8 +163,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-            - name: KVCR_LOG_LEVEL
-              value: DEBUG
+            - name: DYN_LOG
+              value: info,remote_fw_dram=debug,remote_ops=debug
             - name: HF_HOME
               value: /tmp/huggingface
             - name: TRITON_CACHE_DIR
@@ -327,8 +327,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-            - name: KVCR_LOG_LEVEL
-              value: DEBUG
+            - name: DYN_LOG
+              value: info,remote_fw_dram=debug,remote_ops=debug
             - name: HF_HOME
               value: /tmp/huggingface
             - name: TRITON_CACHE_DIR
@@ -387,6 +387,13 @@ spec:
           env:
             - name: DYN_COMPONENT
               value: kv_state_agent
+            # The operator injects DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS='["generate"]'
+            # for workers; this agent serves no "generate" endpoint, so an empty
+            # value makes /health report runtime liveness instead.
+            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+              value: ""
+            - name: DYN_LOG
+              value: debug
             - name: DYN_HEALTH_CHECK_ENABLED
               value: "false"
             - name: NVIDIA_VISIBLE_DEVICES

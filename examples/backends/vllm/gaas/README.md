@@ -51,7 +51,7 @@ Render all of these variables before reviewing a deployment:
 
 The sample claims pool `h7-pool-a` with 1 GiB of data. A separate 0.5 GiB claim
 can exercise independent reclamation. Each holder adds KVCR's 100 MiB journal
-and runtime headroom to its memory reservation. The service has one guard and
+and runtime headroom to its memory reservation. The service has two Guards (guard-count 2, slots 0 and 1, ports 55001/55002) and
 each of the two workers (`VllmWorkerA`, `VllmWorkerB`) uses TP=PP=DP=1 and its own Guard: `--guard-index N` and control port `55001 + N` (override with `--control-port`). The DaemonSet runs on the host network and the workers advertise the node's address through `GAAS_ADVERTISE_HOST` (`--advertise-host`); a v2 launch exits without it. `--state-agent` attaches each worker to the `KvStateAgent` service.
 Runtime block layout comes from the worker's KV view stride, not the pool's
 capacity.
