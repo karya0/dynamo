@@ -501,8 +501,19 @@ def test_main_execs_without_shell(
     assert calls[0][1][3:5] == ["--model", "model with space"]
 
 
+def _repository_root() -> Path:
+    """The checkout holding examples/ and deploy/, or skip: an installed copy has none."""
+    try:
+        root = Path(__file__).parents[5]
+    except IndexError:
+        root = None
+    if root is None or not (root / "examples/backends/vllm/gaas").is_dir():
+        pytest.skip("repository templates are not next to this installed package")
+    return root
+
+
 def test_canonical_templates_match_yaml_and_single_worker_contract():
-    root = Path(__file__).parents[5]
+    root = _repository_root()
     examples = root / "examples/backends/vllm/gaas"
     bundle = json.loads((examples / "manifest-bundle.json").read_text())
     yaml_resources = list(
@@ -539,7 +550,7 @@ def test_canonical_templates_match_yaml_and_single_worker_contract():
 
 
 def test_rendered_dgd_matches_repository_crd_schema():
-    root = Path(__file__).parents[5]
+    root = _repository_root()
     source = (root / "examples/backends/vllm/gaas/manifest-bundle.json").read_text()
     variables = {
         "GAAS_NAME": "gaas-test",
@@ -909,7 +920,7 @@ def test_probe_error_line_and_exit_code_match_the_claimant(monkeypatch, capsys):
 
 
 def test_templates_render_string_args_for_numeric_looking_values():
-    root = Path(__file__).parents[5]
+    root = _repository_root()
     examples = root / "examples/backends/vllm/gaas"
     variables = {
         "GAAS_NAME": "123",
