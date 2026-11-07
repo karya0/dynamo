@@ -590,6 +590,24 @@ def test_canonical_templates_match_yaml_and_single_worker_contract():
         for args in (worker["initContainers"][0]["args"], main["args"]):
             assert args[args.index("--guard-index") + 1] == str(index)
         assert "--state-agent" in main["args"]
+        assert {
+            "name": "POD_IP",
+            "valueFrom": {"fieldRef": {"fieldPath": "status.podIP"}},
+        } in main["env"]
+        assert {"name": "KVCR_LOG_LEVEL", "value": "DEBUG"} in main["env"]
+    agent = services["KvStateAgent"]["extraPodSpec"]
+    assert agent["tolerations"] == [
+        {
+            "key": "nvidia.com/gpu",
+            "operator": "Equal",
+            "value": "true",
+            "effect": "NoSchedule",
+        }
+    ]
+    assert "nvidia.com/gpu" not in agent["mainContainer"].get("resources", {}).get(
+        "limits", {}
+    )
+    assert {"name": "KVCR_LOG_LEVEL", "value": "DEBUG"} in supervisor["env"]
 
 
 def test_rendered_dgd_matches_repository_crd_schema():
@@ -822,6 +840,8 @@ def test_v2_launch_passes_gaas_settings_without_a_holder_address(
                 "4096",
                 "--advertise-host",
                 "10.0.0.1",
+                "--raw-advertise-host",
+                "10.9.9.9",
                 "--state-agent",
                 "--",
                 "--model",
@@ -839,7 +859,8 @@ def test_v2_launch_passes_gaas_settings_without_a_holder_address(
     assert tier["control_ports"] == [55001]
     assert tier["control_host"] == tier["control_advertise_host"] == "10.0.0.1"
     assert tier["guard_index_base"] == 0
-    assert extra["dynamo_state_agent"]["raw_advertise_host"] == "10.0.0.1"
+    assert extra["dynamo_state_agent"]["raw_advertise_host"] == "10.9.9.9"
+    assert tier["enable_telemetry"] is True
     assert extra["dynamo_state_agent"]["cache_owner_ids"]["0"].endswith("/" + "0" * 32)
 
 
@@ -857,12 +878,49 @@ def test_v2_guard_index_selects_port_and_claim_file(
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(os, "execv", lambda exe, args: calls.append(args))
         launch = _v2_args(
-            "launch", output, service_socket, "--guard-index", "1", "--control-port",
-            "55009", "--advertise-host", "h", "--cpu-bytes", "4096", "--", "--model", "m",
+            "launch", output, service_socket, "--guard-index", "1",
+            "--advertise-host", "10.0.0.1", "--cpu-bytes", "4096", "--", "--model", "m",
         )
         assert main(launch, ensure_pool=None) == 0
     tier = json.loads(calls[0][-1])["kv_connector_extra_config"]["secondary_tiers"][0]
     assert tier["guard_index_base"] == 1
+    assert tier["control_ports"] == [55002]
+
+
+def test_v2_launch_rejects_descriptor_guard_or_port_mismatch(
+    tmp_path, service_socket, v2_claim, monkeypatch
+):
+    monkeypatch.setattr(os, "execv", lambda exe, args: pytest.fail("must not exec"))
+    descriptor = {**v2_claim, "state": "ready", "control_port": 55002, "guard_index": 1}
+    claim_file = tmp_path / "claim.json"
+    claim_file.write_text(json.dumps(descriptor))
+    for flags in (
+        ("--guard-index", "0"),  # index and derived port differ
+        ("--guard-index", "1", "--control-port", "55009"),  # port differs
+    ):
+        launch = _v2_args(
+            "launch", claim_file, service_socket, *flags,
+            "--advertise-host", "10.0.0.1", "--cpu-bytes", "4096", "--", "--model", "m",
+        )
+        with pytest.raises(SystemExit, match="template bug"):
+            main(launch, ensure_pool=None)
+
+
+def test_v2_launch_needs_a_literal_ipv4_control_host(v2_claim):
+    descriptor = {**v2_claim, "state": "ready", "control_port": 55001, "guard_index": 0}
+    with pytest.raises(SystemExit, match="IPv4"):
+        launch_argv(descriptor, 4096, ["--model", "m"], advertise_host="node-a")
+    with pytest.raises(SystemExit, match="IPv4"):
+        launch_argv(descriptor, 4096, ["--model", "m"], advertise_host="::1")
+
+
+def test_v2_state_agent_needs_a_raw_advertise_host(v2_claim):
+    descriptor = {**v2_claim, "state": "ready", "control_port": 55001, "guard_index": 0}
+    with pytest.raises(SystemExit, match="raw-advertise-host"):
+        launch_argv(
+            descriptor, 4096, ["--model", "m"],
+            advertise_host="10.0.0.1", state_agent=True,
+        )
 
 
 def test_v2_launch_needs_an_advertise_host(tmp_path, service_socket, v2_claim, monkeypatch):

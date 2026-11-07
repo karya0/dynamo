@@ -100,7 +100,7 @@ this template is therefore not a Baseline-compatible delivery solution. A
 platform-managed device plugin or DRA/CDI directory mount requires separate
 implementation and runtime validation.
 
-CPU roles disable GPU visibility. The worker template requests one GPU only;
+CPU roles disable GPU visibility. The worker template requests two single-GPU workers only;
 deploy it through a reviewed namespace-fenced launcher after resource approval.
 No cluster or GPU run is required to execute the wrapper's unit tests.
 

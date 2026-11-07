@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Experimental template; this requests one GPU only after explicit approval.
+# Experimental template; this requests two single-GPU workers only after explicit approval.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -159,6 +159,12 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: KVCR_LOG_LEVEL
+              value: DEBUG
             - name: HF_HOME
               value: /tmp/huggingface
             - name: TRITON_CACHE_DIR
@@ -317,6 +323,12 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: KVCR_LOG_LEVEL
+              value: DEBUG
             - name: HF_HOME
               value: /tmp/huggingface
             - name: TRITON_CACHE_DIR
@@ -358,6 +370,11 @@ spec:
       extraPodSpec:
         nodeSelector:
           kubernetes.io/hostname: "${GAAS_NODE}"
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Equal
+            value: "true"
+            effect: NoSchedule
         imagePullSecrets:
           - name: nvcrimagepullsecret
         mainContainer:

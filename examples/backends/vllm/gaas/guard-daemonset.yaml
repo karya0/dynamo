@@ -124,6 +124,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: KVCR_LOG_LEVEL
+              value: DEBUG
             - name: KVCR_ADVERTISE_HOST
               valueFrom:
                 fieldRef:

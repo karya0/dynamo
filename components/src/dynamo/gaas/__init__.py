@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Init-container gate and launcher for a single-worker KVCR pool claim."""
+"""Init-container gate and launcher for two single-GPU workers' KVCR pool claims."""
 
 import argparse
 import ipaddress
@@ -306,6 +306,7 @@ def launch_argv(
     *,
     advertise_host: str | None = None,
     state_agent: bool = False,
+    raw_advertise_host: str | None = None,
 ) -> list[str]:
     if isinstance(cpu_bytes, bool) or cpu_bytes <= 0:
         raise ValueError("cpu_bytes must be positive")
@@ -355,6 +356,18 @@ def launch_argv(
                 "GaaS v2 needs --advertise-host/GAAS_ADVERTISE_HOST: "
                 "the router hint source must be advertisable"
             )
+        try:
+            ipaddress.IPv4Address(advertise_host)
+        except ValueError:
+            raise SystemExit(
+                "GaaS v2 needs --advertise-host to be a literal IPv4 address "
+                f"(got {advertise_host!r}): the Guard binds and advertises it"
+            ) from None
+        if state_agent and not raw_advertise_host:
+            raise SystemExit(
+                "GaaS v2 with --state-agent needs --raw-advertise-host/POD_IP: "
+                "the KV-event publisher binds pod-local, not on the host IP"
+            )
         required["gaas"] = descriptor["gaas"]
         required["control_host"] = advertise_host
         required["control_advertise_host"] = advertise_host
@@ -365,6 +378,8 @@ def launch_argv(
         if key in tier and tier[key] != value:
             raise ValueError(f"existing secondary-tier {key} conflicts with the claim")
         tier[key] = value
+    if "gaas" in descriptor:
+        tier.setdefault("enable_telemetry", True)
     capabilities = tier.setdefault("router_capabilities", ["router_hint"])
     if not isinstance(capabilities, list) or "router_hint" not in capabilities:
         raise ValueError("KVCR requires router_hint capability")
@@ -374,7 +389,7 @@ def launch_argv(
     if state_agent:
         slot = descriptor["guard_index"]
         extra["dynamo_state_agent"] = {
-            "raw_advertise_host": advertise_host,
+            "raw_advertise_host": raw_advertise_host,
             "cache_owner_ids": {
                 "0": "01010101010101010101010101010101:"
                 f"02020202020202020202020202020202/0303030303030303/{slot:032x}"
@@ -432,6 +447,10 @@ def main(argv: Sequence[str] | None = None, *, ensure_pool: EnsurePool) -> int:
         command_parser.add_argument(
             "--advertise-host", default=os.environ.get("GAAS_ADVERTISE_HOST")
         )
+        command_parser.add_argument(
+            "--raw-advertise-host",
+            default=os.environ.get("POD_IP") or os.environ.get("GAAS_POD_IP"),
+        )
         if command == "init":
             command_parser.add_argument("--timeout-s", type=float, default=180)
         else:
@@ -487,12 +506,23 @@ def main(argv: Sequence[str] | None = None, *, ensure_pool: EnsurePool) -> int:
     backend_args = args.backend_args
     if backend_args[:1] == ["--"]:
         backend_args = backend_args[1:]
+    if gaas and (
+        descriptor["guard_index"] != args.guard_index
+        or descriptor["control_port"] != control_port
+    ):
+        raise SystemExit(
+            f"claim descriptor guard_index/control_port "
+            f"({descriptor['guard_index']}/{descriptor['control_port']}) do not match "
+            f"--guard-index/--control-port ({args.guard_index}/{control_port}): "
+            "template bug"
+        )
     command = launch_argv(
         descriptor,
         args.cpu_bytes,
         backend_args,
         advertise_host=args.advertise_host,
         state_agent=args.state_agent,
+        raw_advertise_host=args.raw_advertise_host,
     )
     os.execv(command[0], command)
     return 0
