@@ -94,9 +94,9 @@ def claim_spec(
     for name, value in (("minimum", minimum_gb), ("maximum", maximum_gb)):
         if value is not None:
             gaas[f"{name}_bytes"] = int(_capacity(value, f"{name}_gb") * (1 << 30))
-    if gaas.get("minimum_bytes", 0) > gaas["total_bytes"] or gaas["total_bytes"] > gaas.get(
-        "maximum_bytes", gaas["total_bytes"]
-    ):
+    if gaas.get("minimum_bytes", 0) > gaas["total_bytes"] or gaas[
+        "total_bytes"
+    ] > gaas.get("maximum_bytes", gaas["total_bytes"]):
         raise ValueError("GaaS capacities must satisfy minimum <= size <= maximum")
     state_agent = {
         key: value
@@ -379,7 +379,9 @@ def main(argv: Sequence[str] | None = None, *, ensure_pool: EnsurePool) -> int:
         return probe(argv[1:])
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("probe", help="CPU-only claimant; flags as kvcr.service.claimant")
+    commands.add_parser(
+        "probe", help="CPU-only claimant; flags as kvcr.service.claimant"
+    )
     for command in ("init", "launch"):
         command_parser = commands.add_parser(command)
         command_parser.add_argument("--broker-socket")

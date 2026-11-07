@@ -646,18 +646,30 @@ def test_v2_claim_spec_carries_bytes_and_state_agent(v2_claim, service_socket):
             "absolute",
         ),
         (
-            {"tenant": "t", "lineage": "l", "service_socket": "/s/x.sock",
-             "maximum_gb": 0.5},
+            {
+                "tenant": "t",
+                "lineage": "l",
+                "service_socket": "/s/x.sock",
+                "maximum_gb": 0.5,
+            },
             "minimum <= size <= maximum",
         ),
         (
-            {"tenant": "t", "lineage": "l", "service_socket": "/s/x.sock",
-             "minimum_gb": 2},
+            {
+                "tenant": "t",
+                "lineage": "l",
+                "service_socket": "/s/x.sock",
+                "minimum_gb": 2,
+            },
             "minimum <= size <= maximum",
         ),
         (
-            {"tenant": "t", "lineage": "l", "service_socket": "/s/x.sock",
-             "maximum_gb": 257},
+            {
+                "tenant": "t",
+                "lineage": "l",
+                "service_socket": "/s/x.sock",
+                "maximum_gb": 257,
+            },
             "maximum_gb must be 0.5 to 256 GiB in whole MiB",
         ),
     ],
@@ -721,9 +733,7 @@ def test_wait_for_socket_times_out_without_one(tmp_path):
     assert now[0] == 3
     (tmp_path / "file").write_text("")
     with pytest.raises(TimeoutError):  # a regular file is not the supervisor
-        wait_for_socket(
-            str(tmp_path / "file"), 1, sleep=sleep, clock=lambda: now[0]
-        )
+        wait_for_socket(str(tmp_path / "file"), 1, sleep=sleep, clock=lambda: now[0])
 
 
 def test_v1_still_requires_the_broker_socket(tmp_path):
