@@ -101,9 +101,9 @@ spec:
             - --guard-count
             - "1"
             - --pool-sizes-gb
-            - ${GAAS_POOL_SIZES_GB}
+            - "${GAAS_POOL_SIZES_GB}"
             - --compatibility-digest
-            - ${GAAS_COMPATIBILITY_DIGEST}
+            - "${GAAS_COMPATIBILITY_DIGEST}"
             - --slot-cap-bytes
             - "${GAAS_SLOT_CAP_BYTES}"
             - --holder-image
@@ -111,7 +111,7 @@ spec:
             - --slot-root
             - ${GAAS_SOCKET_ROOT}/slots
             - --manager-id
-            - ${GAAS_NAME}
+            - "${GAAS_NAME}"
             - --disable-hugepages
           env:
             - name: POD_NAMESPACE

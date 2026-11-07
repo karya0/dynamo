@@ -906,3 +906,52 @@ def test_probe_error_line_and_exit_code_match_the_claimant(monkeypatch, capsys):
         "reason": "capacity_below_minimum",
         "message": "no room",
     }
+
+
+def test_templates_render_string_args_for_numeric_looking_values():
+    root = Path(__file__).parents[5]
+    examples = root / "examples/backends/vllm/gaas"
+    variables = {
+        "GAAS_NAME": "123",
+        "GAAS_NAMESPACE": "456",
+        "GAAS_NODE": "node-a",
+        "GAAS_SOCKET_ROOT": "/node-shm/g7-test",
+        "GAAS_IMAGE": "registry.example/image@sha256:" + "1" * 64,
+        "GAAS_COMPATIBILITY_DIGEST": "1" * 64,
+        "GAAS_MODEL": "1e5",
+        "GAAS_MODEL_REVISION": "1" * 40,
+        "GAAS_CPU_PRIMARY_BYTES": "67108864",
+        "GAAS_GPU_KV_BYTES": "268435456",
+        "GAAS_MAX_MODEL_LEN": "8192",
+        "GAAS_POOL_SIZES_GB": "4",
+        "GAAS_SLOT_CAP_BYTES": "4294967296",
+    }
+
+    def render(text):
+        return re.sub(r"\$\{(GAAS_[A-Z_]+)\}", lambda m: variables[m[1]], text)
+
+    bundle = json.loads(render((examples / "manifest-bundle.json").read_text()))
+    documents = list(
+        yaml.safe_load_all(render((examples / "guard-daemonset.yaml").read_text()))
+    )
+    documents.append(yaml.safe_load(render((examples / "dgd.yaml").read_text())))
+    assert bundle["resources"] == documents
+
+    def containers(document):
+        spec = document.get("spec", {})
+        pod = spec.get("template", {}).get("spec") or {
+            key: value
+            for service in spec.get("services", {}).values()
+            for key, value in service.get("extraPodSpec", {}).items()
+        }
+        yield from pod.get("initContainers", [])
+        yield from pod.get("containers", [])
+        if "mainContainer" in pod:
+            yield pod["mainContainer"]
+
+    seen = 0
+    for document in documents:
+        for container in containers(document):
+            seen += 1
+            assert all(isinstance(arg, str) for arg in container.get("args", []))
+    assert seen >= 3

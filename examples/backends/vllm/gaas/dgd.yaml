@@ -68,17 +68,17 @@ spec:
               - --size-gb
               - "1.0"
               - --compatibility-digest
-              - ${GAAS_COMPATIBILITY_DIGEST}
+              - "${GAAS_COMPATIBILITY_DIGEST}"
               - --tenant
-              - ${GAAS_NAME}
+              - "${GAAS_NAME}"
               - --lineage
-              - ${GAAS_NAME}
+              - "${GAAS_NAME}"
               - --minimum-gb
               - "0.5"
               - --maximum-gb
               - "2.0"
               - --state-agent-namespace
-              - ${GAAS_NAMESPACE}-${GAAS_NAME}
+              - "${GAAS_NAMESPACE}-${GAAS_NAME}"
               - --service-socket
               - ${GAAS_SOCKET_ROOT}/service.sock
             env:
@@ -114,26 +114,26 @@ spec:
             - --size-gb
             - "1.0"
             - --compatibility-digest
-            - ${GAAS_COMPATIBILITY_DIGEST}
+            - "${GAAS_COMPATIBILITY_DIGEST}"
             - --tenant
-            - ${GAAS_NAME}
+            - "${GAAS_NAME}"
             - --lineage
-            - ${GAAS_NAME}
+            - "${GAAS_NAME}"
             - --minimum-gb
             - "0.5"
             - --maximum-gb
             - "2.0"
             - --state-agent-namespace
-            - ${GAAS_NAMESPACE}-${GAAS_NAME}
+            - "${GAAS_NAMESPACE}-${GAAS_NAME}"
             - --service-socket
             - ${GAAS_SOCKET_ROOT}/service.sock
             - --cpu-bytes
             - "${GAAS_CPU_PRIMARY_BYTES}"
             - --
             - --model
-            - ${GAAS_MODEL}
+            - "${GAAS_MODEL}"
             - --revision
-            - ${GAAS_MODEL_REVISION}
+            - "${GAAS_MODEL_REVISION}"
             - --tensor-parallel-size
             - "1"
             - --pipeline-parallel-size

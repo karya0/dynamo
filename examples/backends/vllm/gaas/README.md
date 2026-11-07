@@ -24,7 +24,8 @@ pod UID. The worker's `init` waits for that socket and `launch` claims through
 it with `--tenant` and `--lineage` (the DGD name); the supervisor creates the
 holder inside the claim. The worker also passes `--state-agent-namespace ${GAAS_NAMESPACE}-${GAAS_NAME}`,
 the operator's Dynamo namespace for the graph (`ComputeDynamoNamespace`, valid
-while it fits a 63-character label), so the supervisor enforces the
+while the DGD name has no dots, which the operator turns into dashes, and the
+result fits a 63-character label), so the supervisor enforces the
 `nvidia.com/dynamo-namespace` label as well as the lineage label. Without those flags the worker uses the v1 broker path.
 
 `guard-daemonset.yaml` contains a namespaced ServiceAccount, Role, RoleBinding
