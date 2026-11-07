@@ -598,6 +598,7 @@ def test_canonical_templates_match_yaml_and_single_worker_contract():
             "name": "DYN_LOG",
             "value": "info,remote_fw_dram=debug,remote_ops=debug",
         } in main["env"]
+        assert {"name": "KVCR_LOG_LEVEL", "value": "DEBUG"} in main["env"]
     agent = services["KvStateAgent"]["extraPodSpec"]
     assert agent["tolerations"] == [
         {
