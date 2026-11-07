@@ -61,8 +61,6 @@ spec:
             image: ${GAAS_IMAGE}
             command: [python3, -m, dynamo.gaas, init]
             args:
-              - --broker-socket
-              - ${GAAS_SOCKET_ROOT}/broker.sock
               - --claim-file
               - /run/gaas/claim.json
               - --pool-id
@@ -71,6 +69,16 @@ spec:
               - "1.0"
               - --compatibility-digest
               - ${GAAS_COMPATIBILITY_DIGEST}
+              - --tenant
+              - ${GAAS_NAME}
+              - --lineage
+              - ${GAAS_NAME}
+              - --minimum-gb
+              - "0.5"
+              - --maximum-gb
+              - "2.0"
+              - --service-socket
+              - ${GAAS_SOCKET_ROOT}/service.sock
             env:
               - name: NVIDIA_VISIBLE_DEVICES
                 value: void
@@ -97,8 +105,6 @@ spec:
           image: ${GAAS_IMAGE}
           command: [python3, -m, dynamo.gaas, launch]
           args:
-            - --broker-socket
-            - ${GAAS_SOCKET_ROOT}/broker.sock
             - --claim-file
             - /run/gaas/claim.json
             - --pool-id
@@ -107,6 +113,16 @@ spec:
             - "1.0"
             - --compatibility-digest
             - ${GAAS_COMPATIBILITY_DIGEST}
+            - --tenant
+            - ${GAAS_NAME}
+            - --lineage
+            - ${GAAS_NAME}
+            - --minimum-gb
+            - "0.5"
+            - --maximum-gb
+            - "2.0"
+            - --service-socket
+            - ${GAAS_SOCKET_ROOT}/service.sock
             - --cpu-bytes
             - "${GAAS_CPU_PRIMARY_BYTES}"
             - --

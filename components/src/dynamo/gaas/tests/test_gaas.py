@@ -6,10 +6,14 @@ import ast
 import hashlib
 import json
 import logging
+import mmap
 import os
 import re
 import stat
+import socket
 import subprocess
+import sys
+import tempfile
 import uuid
 from pathlib import Path
 from collections import defaultdict
@@ -18,6 +22,12 @@ from typing import Any
 import jsonschema
 import pytest
 import yaml
+from kvcr.service.protocol import (
+    KVCRServiceReasonError,
+    PoolRegion,
+    _Grown,
+    _Shrunk,
+)
 
 from dynamo.gaas import (
     claim_spec,
@@ -25,6 +35,8 @@ from dynamo.gaas import (
     main,
     prepare_claim,
     validate_descriptor,
+    validate_gaas_descriptor,
+    wait_for_socket,
 )
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0, pytest.mark.unit]
@@ -558,3 +570,329 @@ def test_rendered_dgd_matches_repository_crd_schema():
     )
     version = next(v for v in crd["spec"]["versions"] if v["name"] == "v1alpha1")
     jsonschema.Draft4Validator(version["schema"]["openAPIV3Schema"]).validate(dgd)
+
+
+# -- GaaS (v2) claim: tenant and lineage select it; the supervisor creates the holder.
+
+_GIB = 1 << 30
+_V2_FLAGS = [
+    "--tenant",
+    "t1",
+    "--lineage",
+    "dgd-a",
+    "--minimum-gb",
+    "0.5",
+    "--maximum-gb",
+    "2",
+    "--state-agent-namespace",
+    "ns",
+    "--state-agent-component",
+    "backend",
+]
+
+
+@pytest.fixture
+def service_socket():
+    with tempfile.TemporaryDirectory(prefix="gaas-", dir="/tmp") as directory:
+        yield str(Path(directory) / "service.sock")
+
+
+@pytest.fixture
+def v2_claim(service_socket):
+    return claim_spec(
+        "pool-a",
+        1.0,
+        "model-layout-digest",
+        tenant="t1",
+        lineage="dgd-a",
+        minimum_gb=0.5,
+        maximum_gb=2,
+        state_agent_namespace="ns",
+        state_agent_component="backend",
+        service_socket=service_socket,
+    )
+
+
+def test_v1_claim_spec_is_unchanged_without_gaas_flags():
+    assert claim_spec("pool", 1.0, "d") == {
+        "pool_id": "pool",
+        "size_gb": 1.0,
+        "compatibility_digest": "d",
+    }
+
+
+def test_v2_claim_spec_carries_bytes_and_state_agent(v2_claim, service_socket):
+    assert v2_claim["service_socket_path"] == service_socket
+    assert v2_claim["gaas"] == {
+        "tenant": "t1",
+        "lineage": "dgd-a",
+        "total_bytes": _GIB,
+        "minimum_bytes": _GIB // 2,
+        "maximum_bytes": 2 * _GIB,
+        "state_agent": {"namespace": "ns", "component": "backend"},
+    }
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({"tenant": "t"}, "tenant and lineage"),
+        ({"lineage": "l"}, "tenant and lineage"),
+        ({"minimum_gb": 1}, "need tenant and lineage"),
+        ({"service_socket": "/s/x.sock"}, "need tenant and lineage"),
+        ({"tenant": "t", "lineage": "l"}, "service socket"),
+        (
+            {"tenant": "t", "lineage": "l", "service_socket": "rel.sock"},
+            "absolute",
+        ),
+        (
+            {"tenant": "t", "lineage": "l", "service_socket": "/s/x.sock",
+             "maximum_gb": 0.25},
+            "minimum <= size <= maximum",
+        ),
+        (
+            {"tenant": "t", "lineage": "l", "service_socket": "/s/x.sock",
+             "minimum_gb": 2},
+            "minimum <= size <= maximum",
+        ),
+        (
+            {"tenant": "t", "lineage": "l", "service_socket": "/s/x.sock",
+             "maximum_gb": 257},
+            "maximum_gb must be 0.5 to 256 GiB in whole MiB",
+        ),
+    ],
+)
+def test_v2_claim_spec_rejects_bad_settings(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        claim_spec("pool", 1.0, "d", **kwargs)
+
+
+def _v2_args(command, claim_file, service_socket, *extra):
+    return [
+        command,
+        "--claim-file",
+        str(claim_file),
+        "--pool-id",
+        "pool-a",
+        "--size-gb",
+        "1.0",
+        "--compatibility-digest",
+        "model-layout-digest",
+        *_V2_FLAGS,
+        "--service-socket",
+        service_socket,
+        *extra,
+    ]
+
+
+def test_v2_init_waits_for_the_socket_not_the_broker(
+    tmp_path, service_socket, v2_claim
+):
+    output = tmp_path / "claim.json"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind(service_socket)
+        assert (
+            main(
+                _v2_args("init", output, service_socket, "--timeout-s", "5"),
+                ensure_pool=lambda *a, **k: pytest.fail("v2 must not call the broker"),
+            )
+            == 0
+        )
+    descriptor = json.loads(output.read_text())
+    assert descriptor == {
+        **v2_claim,
+        "state": "ready",
+        "control_port": 55001,
+        "guard_index": 0,
+    }
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+
+
+def test_wait_for_socket_times_out_without_one(tmp_path):
+    now = [0.0]
+
+    def sleep(seconds):
+        now[0] += seconds
+
+    with pytest.raises(TimeoutError, match="did not appear"):
+        wait_for_socket(
+            str(tmp_path / "none.sock"), 3, sleep=sleep, clock=lambda: now[0]
+        )
+    assert now[0] == 3
+    (tmp_path / "file").write_text("")
+    with pytest.raises(TimeoutError):  # a regular file is not the supervisor
+        wait_for_socket(
+            str(tmp_path / "file"), 1, sleep=sleep, clock=lambda: now[0]
+        )
+
+
+def test_v1_still_requires_the_broker_socket(tmp_path):
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "init",
+                "--claim-file",
+                str(tmp_path / "c.json"),
+                "--pool-id",
+                "pool-a",
+                "--size-gb",
+                "1",
+                "--compatibility-digest",
+                "d",
+            ],
+            ensure_pool=lambda *a, **k: pytest.fail("unexpected"),
+        )
+
+
+def test_v2_launch_passes_gaas_settings_without_a_holder_address(
+    tmp_path, service_socket, v2_claim, monkeypatch
+):
+    descriptor = {**v2_claim, "state": "ready", "control_port": 55001, "guard_index": 0}
+    claim_file = tmp_path / "claim.json"
+    claim_file.write_text(json.dumps(descriptor))
+    calls = []
+    monkeypatch.setattr(os, "execv", lambda exe, args: calls.append(args))
+    assert (
+        main(
+            _v2_args(
+                "launch",
+                claim_file,
+                service_socket,
+                "--cpu-bytes",
+                "4096",
+                "--",
+                "--model",
+                "m",
+            ),
+            ensure_pool=lambda *a, **k: pytest.fail("unexpected broker call"),
+        )
+        == 0
+    )
+    config = json.loads(calls[0][-1])
+    tier = config["kv_connector_extra_config"]["secondary_tiers"][0]
+    assert tier["gaas"] == v2_claim["gaas"]
+    assert tier["kvcr_service_socket_path"] == service_socket
+    assert tier["control_ports"] == [55001]
+    assert "control_advertise_host" not in tier
+
+
+def test_v2_launch_rejects_a_descriptor_for_other_settings(v2_claim):
+    descriptor = {**v2_claim, "state": "ready", "control_port": 55001}
+    validate_gaas_descriptor(descriptor, v2_claim)
+    stale = {**descriptor, "gaas": {**v2_claim["gaas"], "lineage": "other"}}
+    with pytest.raises(ValueError, match="gaas does not match"):
+        validate_gaas_descriptor(stale, v2_claim)
+    with pytest.raises(ValueError, match="not ready"):
+        validate_gaas_descriptor({**descriptor, "state": "pending"}, v2_claim)
+
+
+def test_v2_launch_rejects_conflicting_tier_gaas(v2_claim):
+    descriptor = {**v2_claim, "state": "ready", "control_port": 55001}
+    conflicting = json.dumps(
+        {
+            "kv_connector_extra_config": {
+                "secondary_tiers": [{"type": "kvcr", "gaas": {"tenant": "x"}}]
+            }
+        }
+    )
+    with pytest.raises(ValueError, match="gaas conflicts"):
+        launch_argv(descriptor, 4096, ["--kv-transfer-config", conflicting])
+
+
+# -- probe: the claimant through the KVCR client, with a fake client.
+
+if sys.platform == "linux":
+
+    class _FakeHold:
+        def __init__(self, calls):
+            self.calls = calls
+            self.slot_name, self.claim_generation = "t/l/0", 3
+            self.layout_generation = 1
+            self.region_fds = [os.memfd_create("probe")]
+            os.ftruncate(self.region_fds[0], 2 * mmap.PAGESIZE)
+            self.regions = (PoolRegion(0, 0, mmap.PAGESIZE, None),)
+
+        def release(self, *, activated=True):
+            self.calls.append(("release", activated))
+
+        def close_local(self):
+            self.calls.append(("close_local",))
+            for fd in self.region_fds:
+                os.close(fd)
+            self.region_fds = []
+
+    class _FakeClient:
+        calls: list = []
+
+        def __init__(self, socket_path):
+            self.calls.append(("client", socket_path))
+
+        def claim(self, *args, **kwargs):
+            self.calls.append(("claim", args, kwargs["gaas"].tenant))
+            return _FakeHold(self.calls)
+
+        def grow(self, slot_name, additional_bytes, claim_generation):
+            self.calls.append(("grow", slot_name, additional_bytes, claim_generation))
+            return _Grown(1, (PoolRegion(1, mmap.PAGESIZE, mmap.PAGESIZE, None),), 2)
+
+        def shrink(self, slot_name, region_indices, claim_generation):
+            self.calls.append(("shrink", slot_name, tuple(region_indices)))
+            return _Shrunk(1, tuple(region_indices), 3)
+
+
+_PROBE_FLAGS = [
+    "--socket", "/x/service.sock", "--tenant", "t", "--lineage", "l",
+    "--compatibility-digest", "d", "--tier-config", "pool0:1024",
+    "--total-bytes", "4096", "--minimum-bytes", "4096", "--maximum-bytes", "8192",
+    "--grow-bytes", "4096", "--mode", "grow-shrink", "--release",
+]  # fmt: skip
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="memfd")
+def test_probe_emits_the_claimants_lines_through_the_client_methods(
+    monkeypatch, capsys
+):
+    from kvcr.service import claimant
+
+    monkeypatch.setattr(claimant, "KVCRClient", _FakeClient)
+    _FakeClient.calls = []
+    claimant_code = claimant.main(_PROBE_FLAGS)
+    claimant_out = capsys.readouterr().out
+    claimant_calls, _FakeClient.calls = _FakeClient.calls, []
+    probe_code = main(["probe", *_PROBE_FLAGS], ensure_pool=lambda *a, **k: None)
+    probe_out = capsys.readouterr().out
+    assert claimant_code == probe_code == 0
+    assert probe_out == claimant_out
+    steps = [json.loads(line) for line in probe_out.splitlines()]
+    assert [step["step"] for step in steps] == [
+        "granted", "written", "grown", "shrunk", "released"
+    ]  # fmt: skip
+    assert steps[0]["layout_generation"] == 1 and steps[0]["bytes"] == mmap.PAGESIZE
+    assert steps[2]["layout_generation"] == 2
+    assert steps[3] == {"step": "shrunk", "region_indices": [1], "layout_generation": 3}
+    assert _FakeClient.calls == claimant_calls
+    kinds = [call[0] for call in _FakeClient.calls]
+    assert kinds == ["client", "claim", "grow", "shrink", "release", "close_local"]
+    assert _FakeClient.calls[2] == ("grow", "t/l/0", 4096, 3)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="memfd")
+def test_probe_error_line_and_exit_code_match_the_claimant(monkeypatch, capsys):
+    from kvcr.service import claimant
+
+    class Refusing(_FakeClient):
+        def claim(self, *args, **kwargs):
+            raise KVCRServiceReasonError("no room", "capacity_below_minimum")
+
+    monkeypatch.setattr(claimant, "KVCRClient", Refusing)
+    claimant_code = claimant.main(_PROBE_FLAGS)
+    claimant_out = capsys.readouterr().out
+    probe_code = main(["probe", *_PROBE_FLAGS], ensure_pool=lambda *a, **k: None)
+    probe_out = capsys.readouterr().out
+    assert claimant_code == probe_code == 2
+    assert probe_out == claimant_out
+    assert json.loads(probe_out) == {
+        "step": "error",
+        "reason": "capacity_below_minimum",
+        "message": "no room",
+    }

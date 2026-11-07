@@ -279,8 +279,6 @@
                     "init"
                   ],
                   "args": [
-                    "--broker-socket",
-                    "${GAAS_SOCKET_ROOT}/broker.sock",
                     "--claim-file",
                     "/run/gaas/claim.json",
                     "--pool-id",
@@ -288,7 +286,17 @@
                     "--size-gb",
                     "1.0",
                     "--compatibility-digest",
-                    "${GAAS_COMPATIBILITY_DIGEST}"
+                    "${GAAS_COMPATIBILITY_DIGEST}",
+                    "--tenant",
+                    "${GAAS_NAME}",
+                    "--lineage",
+                    "${GAAS_NAME}",
+                    "--minimum-gb",
+                    "0.5",
+                    "--maximum-gb",
+                    "2.0",
+                    "--service-socket",
+                    "${GAAS_SOCKET_ROOT}/service.sock"
                   ],
                   "env": [
                     {
@@ -340,8 +348,6 @@
                   "launch"
                 ],
                 "args": [
-                  "--broker-socket",
-                  "${GAAS_SOCKET_ROOT}/broker.sock",
                   "--claim-file",
                   "/run/gaas/claim.json",
                   "--pool-id",
@@ -350,6 +356,16 @@
                   "1.0",
                   "--compatibility-digest",
                   "${GAAS_COMPATIBILITY_DIGEST}",
+                  "--tenant",
+                  "${GAAS_NAME}",
+                  "--lineage",
+                  "${GAAS_NAME}",
+                  "--minimum-gb",
+                  "0.5",
+                  "--maximum-gb",
+                  "2.0",
+                  "--service-socket",
+                  "${GAAS_SOCKET_ROOT}/service.sock",
                   "--cpu-bytes",
                   "${GAAS_CPU_PRIMARY_BYTES}",
                   "--",

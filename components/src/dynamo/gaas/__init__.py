@@ -9,7 +9,9 @@ import json
 import os
 import re
 import sys
+import stat
 import tempfile
+import time
 import uuid
 from collections.abc import Callable, Sequence
 from decimal import Decimal, InvalidOperation
@@ -20,26 +22,132 @@ Claim = dict[str, Any]
 EnsurePool = Callable[..., Claim]
 
 
-def claim_spec(pool_id: str, size_gb: float, compatibility_digest: str) -> Claim:
-    if re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", pool_id) is None:
-        raise ValueError("pool_id must be a DNS label")
+def _capacity(value: float | str, name: str) -> Decimal:
     try:
-        size = Decimal(str(size_gb))
+        size = Decimal(str(value))
     except InvalidOperation as error:
-        raise ValueError("invalid size_gb") from error
+        raise ValueError(f"invalid {name}") from error
     if (
         not size.is_finite()
         or not Decimal("0.5") <= size <= 256
         or size != Decimal(int(size * 1024)) / 1024
     ):
-        raise ValueError("size_gb must be 0.5 to 256 GiB in whole MiB")
+        raise ValueError(f"{name} must be 0.5 to 256 GiB in whole MiB")
+    return size
+
+
+def _socket_path(path: str) -> str:
+    endpoint = Path(path)
+    if (
+        not endpoint.is_absolute()
+        or ".." in endpoint.parts
+        or len(os.fsencode(path)) >= 108
+    ):
+        raise ValueError("service socket must be an absolute path under 108 bytes")
+    return path
+
+
+def claim_spec(
+    pool_id: str,
+    size_gb: float,
+    compatibility_digest: str,
+    *,
+    tenant: str | None = None,
+    lineage: str | None = None,
+    minimum_gb: float | None = None,
+    maximum_gb: float | None = None,
+    state_agent_namespace: str | None = None,
+    state_agent_component: str | None = None,
+    service_socket: str | None = None,
+) -> Claim:
+    """The claim to make. With tenant and lineage it is a GaaS (v2) claim."""
+    if re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", pool_id) is None:
+        raise ValueError("pool_id must be a DNS label")
+    size = _capacity(size_gb, "size_gb")
     if not isinstance(compatibility_digest, str) or not compatibility_digest.strip():
         raise ValueError("compatibility_digest must be non-empty")
-    return {
+    spec: Claim = {
         "pool_id": pool_id,
         "size_gb": float(size_gb),
         "compatibility_digest": compatibility_digest,
     }
+    optional = (
+        minimum_gb,
+        maximum_gb,
+        state_agent_namespace,
+        state_agent_component,
+    )
+    if tenant is None and lineage is None:
+        if service_socket is not None or any(v is not None for v in optional):
+            raise ValueError("GaaS settings need tenant and lineage")
+        return spec
+    for name, value in (("tenant", tenant), ("lineage", lineage)):
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"GaaS {name} must be set together and non-empty")
+    if service_socket is None:
+        raise ValueError("a GaaS claim needs the service socket")
+    gaas: Claim = {
+        "tenant": tenant,
+        "lineage": lineage,
+        "total_bytes": int(size * (1 << 30)),
+    }
+    for name, value in (("minimum", minimum_gb), ("maximum", maximum_gb)):
+        if value is not None:
+            gaas[f"{name}_bytes"] = int(_capacity(value, f"{name}_gb") * (1 << 30))
+    if gaas.get("minimum_bytes", 0) > gaas["total_bytes"] or gaas["total_bytes"] > gaas.get(
+        "maximum_bytes", gaas["total_bytes"]
+    ):
+        raise ValueError("GaaS capacities must satisfy minimum <= size <= maximum")
+    state_agent = {
+        key: value
+        for key, value in (
+            ("namespace", state_agent_namespace),
+            ("component", state_agent_component),
+        )
+        if value is not None
+    }
+    if state_agent:
+        gaas["state_agent"] = state_agent
+    spec["service_socket_path"] = _socket_path(service_socket)
+    spec["gaas"] = gaas
+    return spec
+
+
+def wait_for_socket(
+    path: str,
+    timeout_s: float,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
+    """Block until a socket exists at ``path``: the supervisor is serving claims."""
+    if timeout_s <= 0:
+        raise ValueError("timeout_s must be positive")
+    deadline = clock() + timeout_s
+    while True:
+        try:
+            if stat.S_ISSOCK(os.stat(path).st_mode):
+                return
+        except FileNotFoundError:
+            pass
+        if clock() >= deadline:
+            raise TimeoutError(f"service socket {path} did not appear")
+        sleep(1)
+
+
+def validate_gaas_descriptor(descriptor: Claim, expected: Claim) -> Claim:
+    if not isinstance(descriptor, dict):
+        raise ValueError("claim descriptor must be an object")
+    for key, value in expected.items():
+        if descriptor.get(key) != value:
+            raise ValueError(f"claim descriptor {key} does not match the request")
+    if descriptor.get("state") != "ready":
+        raise ValueError("claim descriptor is not ready")
+    if descriptor.get("control_port") != 55001 or isinstance(
+        descriptor.get("control_port"), bool
+    ):
+        raise ValueError("claim descriptor requires control port 55001")
+    return descriptor
 
 
 def validate_descriptor(
@@ -102,6 +210,11 @@ def prepare_claim(
         expected,
         broker_socket,
     )
+    _write_claim_file(descriptor, claim_file)
+    return descriptor
+
+
+def _write_claim_file(descriptor: Claim, claim_file: Path) -> None:
     claim_file.parent.mkdir(parents=True, exist_ok=True)
     temporary_path: Path | None = None
     try:
@@ -119,7 +232,6 @@ def prepare_claim(
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
-    return descriptor
 
 
 def _canonical_backend_args(argv: Sequence[str]) -> list[str]:
@@ -230,8 +342,11 @@ def launch_argv(
         "compatibility_digest": descriptor["compatibility_digest"],
         "control_host": "0.0.0.0",
         "control_ports": [descriptor["control_port"]],
-        "control_advertise_host": descriptor["holder_pod_ip"],
     }
+    if "gaas" in descriptor:  # v2: the holder is created by the claim itself
+        required["gaas"] = descriptor["gaas"]
+    else:
+        required["control_advertise_host"] = descriptor["holder_pod_ip"]
     for key, value in required.items():
         if key in tier and tier[key] != value:
             raise ValueError(f"existing secondary-tier {key} conflicts with the claim")
@@ -255,23 +370,61 @@ def launch_argv(
 
 
 def main(argv: Sequence[str] | None = None, *, ensure_pool: EnsurePool) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["probe"]:
+        # Same flags, JSON lines and exit codes as python -m kvcr.service.claimant,
+        # through the KVCRClient methods the engine uses.
+        from kvcr.service.claimant import main as probe
+
+        return probe(argv[1:])
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("probe", help="CPU-only claimant; flags as kvcr.service.claimant")
     for command in ("init", "launch"):
         command_parser = commands.add_parser(command)
-        command_parser.add_argument("--broker-socket", required=True)
+        command_parser.add_argument("--broker-socket")
         command_parser.add_argument("--claim-file", type=Path, required=True)
         command_parser.add_argument("--pool-id", required=True)
         command_parser.add_argument("--size-gb", required=True)
         command_parser.add_argument("--compatibility-digest", required=True)
+        # GaaS (v2) claim: selected by --tenant and --lineage, size-gb is the total.
+        command_parser.add_argument("--tenant")
+        command_parser.add_argument("--lineage")
+        command_parser.add_argument("--minimum-gb")
+        command_parser.add_argument("--maximum-gb")
+        command_parser.add_argument("--state-agent-namespace")
+        command_parser.add_argument("--state-agent-component")
+        command_parser.add_argument("--service-socket")
         if command == "init":
             command_parser.add_argument("--timeout-s", type=float, default=180)
         else:
             command_parser.add_argument("--cpu-bytes", type=int, required=True)
             command_parser.add_argument("backend_args", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
-    expected = claim_spec(args.pool_id, args.size_gb, args.compatibility_digest)
+    expected = claim_spec(
+        args.pool_id,
+        args.size_gb,
+        args.compatibility_digest,
+        tenant=args.tenant,
+        lineage=args.lineage,
+        minimum_gb=args.minimum_gb,
+        maximum_gb=args.maximum_gb,
+        state_agent_namespace=args.state_agent_namespace,
+        state_agent_component=args.state_agent_component,
+        service_socket=args.service_socket,
+    )
+    gaas = "gaas" in expected
+    if not gaas and args.broker_socket is None:
+        parser.error("--broker-socket is required without --tenant and --lineage")
     if args.command == "init":
+        if gaas:
+            # The supervisor creates the holder inside the claim: wait for its socket.
+            wait_for_socket(expected["service_socket_path"], args.timeout_s)
+            _write_claim_file(
+                {**expected, "state": "ready", "control_port": 55001, "guard_index": 0},
+                args.claim_file,
+            )
+            return 0
         prepare_claim(
             args.broker_socket,
             expected,
@@ -281,9 +434,12 @@ def main(argv: Sequence[str] | None = None, *, ensure_pool: EnsurePool) -> int:
         )
         return 0
     with args.claim_file.open(encoding="utf-8") as input_file:
-        descriptor = validate_descriptor(
-            json.load(input_file), expected, args.broker_socket
-        )
+        loaded = json.load(input_file)
+    descriptor = (
+        validate_gaas_descriptor(loaded, expected)
+        if gaas
+        else validate_descriptor(loaded, expected, args.broker_socket)
+    )
     backend_args = args.backend_args
     if backend_args[:1] == ["--"]:
         backend_args = backend_args[1:]
