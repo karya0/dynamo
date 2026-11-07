@@ -4,6 +4,7 @@
 import argparse
 import ast
 import hashlib
+import importlib.util
 import json
 import logging
 import mmap
@@ -22,13 +23,6 @@ from typing import Any
 import jsonschema
 import pytest
 import yaml
-from kvcr.service.protocol import (
-    KVCRServiceReasonError,
-    PoolRegion,
-    _Grown,
-    _Shrunk,
-)
-
 from dynamo.gaas import (
     claim_spec,
     launch_argv,
@@ -811,7 +805,10 @@ def test_v2_launch_rejects_conflicting_tier_gaas(v2_claim):
 
 # -- probe: the claimant through the KVCR client, with a fake client.
 
-if sys.platform == "linux":
+# The probe tests need KVCR and Linux memfds; the rest of this module does not.
+_NO_PROBE = sys.platform != "linux" or importlib.util.find_spec("kvcr") is None
+if not _NO_PROBE:
+    from kvcr.service.protocol import PoolRegion, _Grown, _Shrunk
 
     class _FakeHold:
         def __init__(self, calls):
@@ -858,7 +855,7 @@ _PROBE_FLAGS = [
 ]  # fmt: skip
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="memfd")
+@pytest.mark.skipif(_NO_PROBE, reason="needs KVCR and Linux memfd")
 def test_probe_emits_the_claimants_lines_through_the_client_methods(
     monkeypatch, capsys
 ):
@@ -886,9 +883,10 @@ def test_probe_emits_the_claimants_lines_through_the_client_methods(
     assert _FakeClient.calls[2] == ("grow", "t/l/0", 4096, 3)
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="memfd")
+@pytest.mark.skipif(_NO_PROBE, reason="needs KVCR and Linux memfd")
 def test_probe_error_line_and_exit_code_match_the_claimant(monkeypatch, capsys):
     from kvcr.service import claimant
+    from kvcr.service.protocol import KVCRServiceReasonError
 
     class Refusing(_FakeClient):
         def claim(self, *args, **kwargs):

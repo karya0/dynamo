@@ -103,24 +103,77 @@
                 "type": "RuntimeDefault"
               }
             },
-            "containers": [
+            "hostPID": true,
+            "initContainers": [
               {
-                "name": "broker",
+                "name": "prepare-dirs",
                 "image": "${GAAS_IMAGE}",
                 "command": [
-                  "kvcr-node-service"
+                  "sh",
+                  "-c",
+                  "mkdir -p ${GAAS_SOCKET_ROOT}/pools ${GAAS_SOCKET_ROOT}/slots && chown -R 1000:1000 ${GAAS_SOCKET_ROOT} && chmod 0700 ${GAAS_SOCKET_ROOT}/slots"
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "100m",
+                    "memory": "64Mi"
+                  },
+                  "limits": {
+                    "memory": "64Mi"
+                  }
+                },
+                "securityContext": {
+                  "runAsUser": 0,
+                  "runAsGroup": 0,
+                  "runAsNonRoot": false,
+                  "allowPrivilegeEscalation": false,
+                  "readOnlyRootFilesystem": true,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ],
+                    "add": [
+                      "CHOWN",
+                      "FOWNER",
+                      "DAC_OVERRIDE"
+                    ]
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "name": "socket-directory",
+                    "mountPath": "/node-shm"
+                  }
+                ]
+              }
+            ],
+            "containers": [
+              {
+                "name": "supervisor",
+                "image": "${GAAS_IMAGE}",
+                "command": [
+                  "kvcr-service"
                 ],
                 "args": [
-                  "--socket-root",
-                  "${GAAS_SOCKET_ROOT}",
-                  "--namespace",
-                  "$(POD_NAMESPACE)",
-                  "--node-name",
-                  "$(NODE_NAME)",
+                  "--socket-path",
+                  "${GAAS_SOCKET_ROOT}/service.sock",
+                  "--pool-dir",
+                  "${GAAS_SOCKET_ROOT}/pools",
+                  "--guard-count",
+                  "1",
+                  "--pool-sizes-gb",
+                  "${GAAS_POOL_SIZES_GB}",
+                  "--compatibility-digest",
+                  "${GAAS_COMPATIBILITY_DIGEST}",
+                  "--slot-cap-bytes",
+                  "${GAAS_SLOT_CAP_BYTES}",
+                  "--holder-image",
+                  "${GAAS_IMAGE}",
+                  "--slot-root",
+                  "${GAAS_SOCKET_ROOT}/slots",
                   "--manager-id",
                   "${GAAS_NAME}",
-                  "--holder-image",
-                  "${GAAS_IMAGE}"
+                  "--disable-hugepages"
                 ],
                 "env": [
                   {

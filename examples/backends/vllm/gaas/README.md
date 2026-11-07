@@ -18,6 +18,12 @@ not the worker's IP. No host networking or shared PID namespace is used.
 
 ## Preparation Inputs
 
+The DaemonSet runs the v2 supervisor (`kvcr-service`, `kvcr.service.server`) on
+`${GAAS_SOCKET_ROOT}/service.sock`, with hostPID so it can read each claimant's
+pod UID. The worker's `init` waits for that socket and `launch` claims through
+it with `--tenant` and `--lineage` (the DGD name); the supervisor creates the
+holder inside the claim. Without those flags the worker uses the v1 broker path.
+
 `guard-daemonset.yaml` contains a namespaced ServiceAccount, Role, RoleBinding
 and a node-pinned DaemonSet. `dgd.yaml` adds the worker init gate through
 `extraPodSpec`. `manifest-bundle.json` contains the same five resources for a
@@ -35,6 +41,8 @@ Render all of these variables before reviewing a deployment:
 | `GAAS_COMPATIBILITY_DIGEST` | Stable model, layout and cache-format compatibility identity |
 | `GAAS_MODEL`, `GAAS_MODEL_REVISION` | Reviewed model and immutable revision |
 | `GAAS_GPU_KV_BYTES`, `GAAS_MAX_MODEL_LEN` | Reviewed GPU KV-cache capacity and context limit |
+| `GAAS_POOL_SIZES_GB` | Supervisor `--pool-sizes-gb` for its one Guard pool |
+| `GAAS_SLOT_CAP_BYTES` | Supervisor `--slot-cap-bytes`, the node's slot capacity |
 | `GAAS_CPU_PRIMARY_BYTES` | CPU primary-tier capacity; distinct from the holder's secondary-pool capacity |
 
 The sample claims pool `h7-pool-a` with 1 GiB of data. A separate 0.5 GiB claim
