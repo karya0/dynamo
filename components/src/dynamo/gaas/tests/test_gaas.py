@@ -791,6 +791,9 @@ def test_v2_launch_passes_gaas_settings_without_a_holder_address(
                 service_socket,
                 "--cpu-bytes",
                 "4096",
+                "--advertise-host",
+                "10.0.0.1",
+                "--state-agent",
                 "--",
                 "--model",
                 "m",
@@ -800,15 +803,53 @@ def test_v2_launch_passes_gaas_settings_without_a_holder_address(
         == 0
     )
     config = json.loads(calls[0][-1])
-    tier = config["kv_connector_extra_config"]["secondary_tiers"][0]
+    extra = config["kv_connector_extra_config"]
+    tier = extra["secondary_tiers"][0]
     assert tier["gaas"] == v2_claim["gaas"]
     assert tier["kvcr_service_socket_path"] == service_socket
     assert tier["control_ports"] == [55001]
-    assert "control_advertise_host" not in tier
+    assert tier["control_host"] == tier["control_advertise_host"] == "10.0.0.1"
+    assert tier["guard_index_base"] == 0
+    assert extra["dynamo_state_agent"]["raw_advertise_host"] == "10.0.0.1"
+    assert extra["dynamo_state_agent"]["cache_owner_ids"]["0"].endswith("/" + "0" * 32)
+
+
+def test_v2_guard_index_selects_port_and_claim_file(
+    tmp_path, service_socket, v2_claim
+):
+    output = tmp_path / "claim.json"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind(service_socket)
+        flags = ("--guard-index", "1", "--timeout-s", "5")
+        assert main(_v2_args("init", output, service_socket, *flags), ensure_pool=None) == 0
+    descriptor = json.loads(output.read_text())
+    assert (descriptor["control_port"], descriptor["guard_index"]) == (55002, 1)
+    calls = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "execv", lambda exe, args: calls.append(args))
+        launch = _v2_args(
+            "launch", output, service_socket, "--guard-index", "1", "--control-port",
+            "55009", "--advertise-host", "h", "--cpu-bytes", "4096", "--", "--model", "m",
+        )
+        assert main(launch, ensure_pool=None) == 0
+    tier = json.loads(calls[0][-1])["kv_connector_extra_config"]["secondary_tiers"][0]
+    assert tier["guard_index_base"] == 1
+
+
+def test_v2_launch_needs_an_advertise_host(tmp_path, service_socket, v2_claim, monkeypatch):
+    monkeypatch.delenv("GAAS_ADVERTISE_HOST", raising=False)
+    descriptor = {**v2_claim, "state": "ready", "control_port": 55001, "guard_index": 0}
+    claim_file = tmp_path / "claim.json"
+    claim_file.write_text(json.dumps(descriptor))
+    launch = _v2_args(
+        "launch", claim_file, service_socket, "--cpu-bytes", "4096", "--", "--model", "m"
+    )
+    with pytest.raises(SystemExit, match="advertise-host"):
+        main(launch, ensure_pool=None)
 
 
 def test_v2_launch_rejects_a_descriptor_for_other_settings(v2_claim):
-    descriptor = {**v2_claim, "state": "ready", "control_port": 55001}
+    descriptor = {**v2_claim, "state": "ready", "control_port": 55001, "guard_index": 0}
     validate_gaas_descriptor(descriptor, v2_claim)
     stale = {**descriptor, "gaas": {**v2_claim["gaas"], "lineage": "other"}}
     with pytest.raises(ValueError, match="gaas does not match"):
@@ -818,7 +859,7 @@ def test_v2_launch_rejects_a_descriptor_for_other_settings(v2_claim):
 
 
 def test_v2_launch_rejects_conflicting_tier_gaas(v2_claim):
-    descriptor = {**v2_claim, "state": "ready", "control_port": 55001}
+    descriptor = {**v2_claim, "state": "ready", "control_port": 55001, "guard_index": 0}
     conflicting = json.dumps(
         {
             "kv_connector_extra_config": {
@@ -827,7 +868,12 @@ def test_v2_launch_rejects_conflicting_tier_gaas(v2_claim):
         }
     )
     with pytest.raises(ValueError, match="gaas conflicts"):
-        launch_argv(descriptor, 4096, ["--kv-transfer-config", conflicting])
+        launch_argv(
+            descriptor,
+            4096,
+            ["--kv-transfer-config", conflicting],
+            advertise_host="10.0.0.1",
+        )
 
 
 # -- probe: the claimant through the KVCR client, with a fake client.

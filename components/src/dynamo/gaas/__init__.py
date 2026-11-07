@@ -143,10 +143,11 @@ def validate_gaas_descriptor(descriptor: Claim, expected: Claim) -> Claim:
             raise ValueError(f"claim descriptor {key} does not match the request")
     if descriptor.get("state") != "ready":
         raise ValueError("claim descriptor is not ready")
-    if descriptor.get("control_port") != 55001 or isinstance(
-        descriptor.get("control_port"), bool
-    ):
-        raise ValueError("claim descriptor requires control port 55001")
+    port, index = descriptor.get("control_port"), descriptor.get("guard_index")
+    if isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536:
+        raise ValueError("claim descriptor requires a valid control port")
+    if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+        raise ValueError("claim descriptor requires a valid guard index")
     return descriptor
 
 
@@ -299,7 +300,12 @@ def _extract_transfer_config(argv: Sequence[str]) -> tuple[list[str], Claim]:
 
 
 def launch_argv(
-    descriptor: Claim, cpu_bytes: int, backend_args: Sequence[str]
+    descriptor: Claim,
+    cpu_bytes: int,
+    backend_args: Sequence[str],
+    *,
+    advertise_host: str | None = None,
+    state_agent: bool = False,
 ) -> list[str]:
     if isinstance(cpu_bytes, bool) or cpu_bytes <= 0:
         raise ValueError("cpu_bytes must be positive")
@@ -344,7 +350,15 @@ def launch_argv(
         "control_ports": [descriptor["control_port"]],
     }
     if "gaas" in descriptor:  # v2: the holder is created by the claim itself
+        if not advertise_host:
+            raise SystemExit(
+                "GaaS v2 needs --advertise-host/GAAS_ADVERTISE_HOST: "
+                "the router hint source must be advertisable"
+            )
         required["gaas"] = descriptor["gaas"]
+        required["control_host"] = advertise_host
+        required["control_advertise_host"] = advertise_host
+        required["guard_index_base"] = descriptor["guard_index"]
     else:
         required["control_advertise_host"] = descriptor["holder_pod_ip"]
     for key, value in required.items():
@@ -357,6 +371,15 @@ def launch_argv(
     extra["spec_name"] = "TieringOffloadingSpec"
     extra["cpu_bytes_to_use"] = cpu_bytes
     extra["self_describing_kv_events"] = True
+    if state_agent:
+        slot = descriptor["guard_index"]
+        extra["dynamo_state_agent"] = {
+            "raw_advertise_host": advertise_host,
+            "cache_owner_ids": {
+                "0": "01010101010101010101010101010101:"
+                f"02020202020202020202020202020202/0303030303030303/{slot:032x}"
+            },
+        }
     config["kv_connector"] = "OffloadingConnector"
     config["kv_role"] = "kv_both"
     return [
@@ -367,6 +390,13 @@ def launch_argv(
         "--kv-transfer-config",
         json.dumps(config, separators=(",", ":")),
     ]
+
+
+def _guard_index(value: str) -> int:
+    index = int(value)
+    if index < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return index
 
 
 def main(argv: Sequence[str] | None = None, *, ensure_pool: EnsurePool) -> int:
@@ -397,10 +427,16 @@ def main(argv: Sequence[str] | None = None, *, ensure_pool: EnsurePool) -> int:
         command_parser.add_argument("--state-agent-namespace")
         command_parser.add_argument("--state-agent-component")
         command_parser.add_argument("--service-socket")
+        command_parser.add_argument("--guard-index", type=_guard_index, default=0)
+        command_parser.add_argument("--control-port", type=int)
+        command_parser.add_argument(
+            "--advertise-host", default=os.environ.get("GAAS_ADVERTISE_HOST")
+        )
         if command == "init":
             command_parser.add_argument("--timeout-s", type=float, default=180)
         else:
             command_parser.add_argument("--cpu-bytes", type=int, required=True)
+            command_parser.add_argument("--state-agent", action="store_true")
             command_parser.add_argument("backend_args", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     expected = claim_spec(
@@ -416,6 +452,7 @@ def main(argv: Sequence[str] | None = None, *, ensure_pool: EnsurePool) -> int:
         service_socket=args.service_socket,
     )
     gaas = "gaas" in expected
+    control_port = args.control_port or 55001 + args.guard_index
     if not gaas and args.broker_socket is None:
         parser.error("--broker-socket is required without --tenant and --lineage")
     if args.command == "init":
@@ -423,7 +460,12 @@ def main(argv: Sequence[str] | None = None, *, ensure_pool: EnsurePool) -> int:
             # The supervisor creates the holder inside the claim: wait for its socket.
             wait_for_socket(expected["service_socket_path"], args.timeout_s)
             _write_claim_file(
-                {**expected, "state": "ready", "control_port": 55001, "guard_index": 0},
+                {
+                    **expected,
+                    "state": "ready",
+                    "control_port": control_port,
+                    "guard_index": args.guard_index,
+                },
                 args.claim_file,
             )
             return 0
@@ -445,6 +487,12 @@ def main(argv: Sequence[str] | None = None, *, ensure_pool: EnsurePool) -> int:
     backend_args = args.backend_args
     if backend_args[:1] == ["--"]:
         backend_args = backend_args[1:]
-    command = launch_argv(descriptor, args.cpu_bytes, backend_args)
+    command = launch_argv(
+        descriptor,
+        args.cpu_bytes,
+        backend_args,
+        advertise_host=args.advertise_host,
+        state_agent=args.state_agent,
+    )
     os.execv(command[0], command)
     return 0
