@@ -501,15 +501,29 @@ def test_main_execs_without_shell(
     assert calls[0][1][3:5] == ["--model", "model with space"]
 
 
-def _repository_root() -> Path:
-    """The checkout holding examples/ and deploy/, or skip: an installed copy has none."""
+def _repository_root(start: Path = Path(__file__)) -> Path:
+    """The checkout holding this package, or skip: an installed copy has none.
+
+    A checkout is recognised by its own source tree, not by the templates, so a
+    checkout that lost examples/ fails the template tests instead of skipping.
+    """
     try:
-        root = Path(__file__).parents[5]
+        root = start.parents[5]
     except IndexError:
         root = None
-    if root is None or not (root / "examples/backends/vllm/gaas").is_dir():
-        pytest.skip("repository templates are not next to this installed package")
+    if root is None or not (root / "components/src/dynamo/gaas").is_dir():
+        pytest.skip("repository checkout is not next to this installed package")
     return root
+
+
+def test_repository_root_skips_only_without_a_checkout(tmp_path):
+    start = tmp_path / "a/b/c/d/e/test_gaas.py"
+    with pytest.raises(pytest.skip.Exception):
+        _repository_root(start)
+    with pytest.raises(pytest.skip.Exception):
+        _repository_root(Path("/test_gaas.py"))
+    (tmp_path / "components/src/dynamo/gaas").mkdir(parents=True)
+    assert _repository_root(start) == tmp_path  # examples/ absent: tests will fail
 
 
 def test_canonical_templates_match_yaml_and_single_worker_contract():
