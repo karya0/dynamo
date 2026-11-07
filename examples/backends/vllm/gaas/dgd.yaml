@@ -66,7 +66,7 @@ spec:
               - --pool-id
               - h7-pool-a
               - --size-gb
-              - "1.0"
+              - "${GAAS_CLAIM_GB}"
               - --compatibility-digest
               - "${GAAS_COMPATIBILITY_DIGEST}"
               - --tenant
@@ -114,7 +114,7 @@ spec:
             - --pool-id
             - h7-pool-a
             - --size-gb
-            - "1.0"
+            - "${GAAS_CLAIM_GB}"
             - --compatibility-digest
             - "${GAAS_COMPATIBILITY_DIGEST}"
             - --tenant
@@ -233,7 +233,7 @@ spec:
               - --pool-id
               - h7-pool-a
               - --size-gb
-              - "1.0"
+              - "${GAAS_CLAIM_GB}"
               - --compatibility-digest
               - "${GAAS_COMPATIBILITY_DIGEST}"
               - --tenant
@@ -281,7 +281,7 @@ spec:
             - --pool-id
             - h7-pool-a
             - --size-gb
-            - "1.0"
+            - "${GAAS_CLAIM_GB}"
             - --compatibility-digest
             - "${GAAS_COMPATIBILITY_DIGEST}"
             - --tenant

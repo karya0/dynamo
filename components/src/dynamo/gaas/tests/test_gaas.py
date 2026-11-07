@@ -1097,7 +1097,7 @@ def test_templates_render_string_args_for_numeric_looking_values():
     }
     daemonset_text = (examples / "guard-daemonset.yaml").read_text()
     assert daemonset_text.count('memory: "${GAAS_SUPERVISOR_MEMORY}"') == 2
-    assert (examples / "dgd.yaml").read_text().count('"${GAAS_CLAIM_GB}"') == 8
+    assert (examples / "dgd.yaml").read_text().count('"${GAAS_CLAIM_GB}"') == 12
 
     def render(text):
         return re.sub(r"\$\{(GAAS_[A-Z_]+)\}", lambda m: variables[m[1]], text)
@@ -1127,3 +1127,49 @@ def test_templates_render_string_args_for_numeric_looking_values():
             seen += 1
             assert all(isinstance(arg, str) for arg in container.get("args", []))
     assert seen >= 3
+
+
+def test_dgd_claim_args_validate_for_a_50_gib_claim():
+    text = (
+        _repository_root() / "examples/backends/vllm/gaas/dgd.yaml"
+    ).read_text()
+    variables = {
+        "GAAS_CLAIM_GB": "50",
+        "GAAS_NAME": "n",
+        "GAAS_NAMESPACE": "ns",
+        "GAAS_SOCKET_ROOT": "/node-shm/t",
+    }
+    rendered = re.sub(
+        r"\$\{(GAAS_[A-Z_]+)\}", lambda m: variables.get(m[1], "x"), text
+    )
+    document = yaml.safe_load(rendered)
+    containers = [
+        container
+        for service in document["spec"]["services"].values()
+        for container in service["extraPodSpec"].get("initContainers", [])
+        if container["name"] == "gaas-claim"
+    ]
+    assert containers
+    for container in containers:
+        args = container["args"]
+        flags = {
+            args[i][2:]: args[i + 1] for i in range(0, len(args) - 1, 2)
+        }
+        claim = claim_spec(
+            flags["pool-id"],
+            flags["size-gb"],
+            flags["compatibility-digest"],
+            tenant=flags["tenant"],
+            lineage=flags["lineage"],
+            minimum_gb=flags["minimum-gb"],
+            maximum_gb=flags["maximum-gb"],
+            state_agent_namespace=flags["state-agent-namespace"],
+            service_socket=flags["service-socket"],
+        )
+        gaas = claim["gaas"]
+        assert (
+            gaas["total_bytes"]
+            == gaas["minimum_bytes"]
+            == gaas["maximum_bytes"]
+            == 53687091200
+        )

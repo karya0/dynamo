@@ -49,10 +49,10 @@ Render all of these variables before reviewing a deployment:
 | `GAAS_SLOT_CAP_BYTES` | Supervisor `--slot-cap-bytes`, the node's slot capacity |
 | `GAAS_CPU_PRIMARY_BYTES` | CPU primary-tier capacity; distinct from the holder's secondary-pool capacity |
 | `GAAS_SUPERVISOR_MEMORY` | `kvcr-service` container memory request and limit (required, no default; the render raises KeyError if unset). The supervisor commits one in-process pool per Guard rank at startup, charged to this pod, so size it at guard-count x (pool size + 100 MiB) plus ~0.5 GiB: e.g. `4Gi` for guard-count 2 with 1 GiB pools, ~`104Gi` for 50 GiB pools |
-| `GAAS_CLAIM_GB` | v2 claim size, used for both `--minimum-gb` and `--maximum-gb` of every `gaas-claim` init container and worker. GiB (binary, same unit as `--pool-sizes-gb`); on the S4b path set it to `GAAS_CPU_PRIMARY_BYTES` / 2^30 so the grant equals the engine's CPU pool exactly; partial grants are refused |
+| `GAAS_CLAIM_GB` | v2 claim size (required, no default; the render raises KeyError if unset), used for `--size-gb` (total), `--minimum-gb` and `--maximum-gb` (exact grant) of every `gaas-claim` init container and worker. GiB (binary, same unit as `--pool-sizes-gb`); on the S4b path set it to `GAAS_CPU_PRIMARY_BYTES` / 2^30 so the grant equals the engine's CPU pool exactly; partial grants are refused |
 
-The sample claims pool `h7-pool-a` with 1 GiB of data. A separate 0.5 GiB claim
-can exercise independent reclamation. Each holder adds KVCR's 100 MiB journal
+The sample claims pool `h7-pool-a` with `GAAS_CLAIM_GB` GiB of data. A separate smaller claim
+(0.5 GiB minimum) can exercise independent reclamation. Each holder adds KVCR's 100 MiB journal
 and runtime headroom to its memory reservation. The service has two Guards (guard-count 2, slots 0 and 1, ports 55001/55002) and
 each of the two workers (`VllmWorkerA`, `VllmWorkerB`) uses TP=PP=DP=1 and its own Guard: `--guard-index N` and control port `55001 + N` (override with `--control-port`). The DaemonSet runs on the host network and the workers advertise the node's address through `GAAS_ADVERTISE_HOST` (`--advertise-host`); a v2 launch exits without it. `--state-agent` attaches each worker to the `KvStateAgent` service.
 Runtime block layout comes from the worker's KV view stride, not the pool's
