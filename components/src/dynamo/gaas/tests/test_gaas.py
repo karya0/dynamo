@@ -636,8 +636,8 @@ def test_v2_claim_spec_carries_bytes_and_state_agent(v2_claim, service_socket):
 @pytest.mark.parametrize(
     "kwargs, message",
     [
-        ({"tenant": "t"}, "tenant and lineage"),
-        ({"lineage": "l"}, "tenant and lineage"),
+        ({"tenant": "t"}, "set together"),
+        ({"lineage": "l"}, "set together"),
         ({"minimum_gb": 1}, "need tenant and lineage"),
         ({"service_socket": "/s/x.sock"}, "need tenant and lineage"),
         ({"tenant": "t", "lineage": "l"}, "service socket"),
@@ -647,7 +647,7 @@ def test_v2_claim_spec_carries_bytes_and_state_agent(v2_claim, service_socket):
         ),
         (
             {"tenant": "t", "lineage": "l", "service_socket": "/s/x.sock",
-             "maximum_gb": 0.25},
+             "maximum_gb": 0.5},
             "minimum <= size <= maximum",
         ),
         (
