@@ -418,7 +418,12 @@
               "mainContainer": {
                 "name": "main",
                 "image": "${GAAS_IMAGE}",
+                "terminationMessagePolicy": "FallbackToLogsOnError",
                 "command": [
+                  "/bin/sh",
+                  "-c",
+                  "rm -f /dev/shm/vllm_offload_*.mmap; exec \"$@\"",
+                  "--",
                   "python3",
                   "-m",
                   "dynamo.gaas",
@@ -681,7 +686,12 @@
               "mainContainer": {
                 "name": "main",
                 "image": "${GAAS_IMAGE}",
+                "terminationMessagePolicy": "FallbackToLogsOnError",
                 "command": [
+                  "/bin/sh",
+                  "-c",
+                  "rm -f /dev/shm/vllm_offload_*.mmap; exec \"$@\"",
+                  "--",
                   "python3",
                   "-m",
                   "dynamo.gaas",

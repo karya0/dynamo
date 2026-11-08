@@ -111,7 +111,9 @@ spec:
         mainContainer:
           name: main
           image: ${GAAS_IMAGE}
-          command: [python3, -m, dynamo.gaas, launch]
+          terminationMessagePolicy: FallbackToLogsOnError
+          # Remove stale vLLM CPU offload region files: /dev/shm is a pod-local emptyDir and engine_id changes per container restart.
+          command: [/bin/sh, -c, 'rm -f /dev/shm/vllm_offload_*.mmap; exec "$@"', --, python3, -m, dynamo.gaas, launch]
           args:
             - --claim-file
             - /run/gaas/claim.json
@@ -290,7 +292,9 @@ spec:
         mainContainer:
           name: main
           image: ${GAAS_IMAGE}
-          command: [python3, -m, dynamo.gaas, launch]
+          terminationMessagePolicy: FallbackToLogsOnError
+          # Remove stale vLLM CPU offload region files: /dev/shm is a pod-local emptyDir and engine_id changes per container restart.
+          command: [/bin/sh, -c, 'rm -f /dev/shm/vllm_offload_*.mmap; exec "$@"', --, python3, -m, dynamo.gaas, launch]
           args:
             - --claim-file
             - /run/gaas/claim.json
