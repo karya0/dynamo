@@ -1976,7 +1976,7 @@ async fn finish_owner_recovery(
                 Ok(status) => status,
                 Err(error) => {
                     fail_owner_recovery(plan.owner, plan.source.publisher_id, runtime).await;
-                    tracing::warn!(owner = %plan.owner, %error, "KV state-agent status handshake failed");
+                    tracing::warn!(owner = %plan.owner, error = %format!("{error:#}"), "KV state-agent status handshake failed");
                     return Ok(());
                 }
             };
@@ -1985,7 +1985,7 @@ async fn finish_owner_recovery(
                     Ok(response) => response,
                     Err(error) => {
                         fail_owner_recovery(plan.owner, plan.source.publisher_id, runtime).await;
-                        tracing::warn!(owner = %plan.owner, %error, "KV state-agent recovery query failed");
+                        tracing::warn!(owner = %plan.owner, error = %format!("{error:#}"), "KV state-agent recovery query failed");
                         return Ok(());
                     }
                 };

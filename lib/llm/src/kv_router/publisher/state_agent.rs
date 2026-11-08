@@ -2132,6 +2132,41 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_cache_owner_projection_rejects_untyped_recurrent_placeholder() {
+        // vLLM's placeholder store for a recurrent group must name its kind
+        // ("mamba"). Without it, an unlearned group 0 counts as main attention,
+        // so block_size 0 fails the geometry check and the owner fails closed.
+        let worker = WorkerWithDpRank::new(17, 0);
+        for medium in ["CPU", "STORAGE"] {
+            let recurrent = serde_json::from_value(serde_json::json!({
+                "type": "BlockStored", "block_hashes": [100], "medium": medium,
+                "token_ids": [], "block_size": 0, "group_idx": 0,
+                "kv_cache_spec_kind": null, "ownership": "kvcr"
+            }))
+            .unwrap();
+            let full = serde_json::from_value(serde_json::json!({
+                "type": "BlockStored", "block_hashes": [101], "medium": medium,
+                "token_ids": [10, 11, 12, 13], "block_size": 4, "group_idx": 3,
+                "kv_cache_spec_kind": "full_attention", "ownership": "kvcr"
+            }))
+            .unwrap();
+            let normalized = normalize_raw_batch(
+                vec![recurrent, full],
+                worker,
+                4,
+                KvStateIngressProtocol::VllmResidencyV1,
+                &mut ZmqEventNormalizer::new(4),
+                &mut ZmqEventNormalizer::new(4),
+            );
+            assert_eq!(
+                normalized.cache_owner_fault,
+                Some("KVCR block size is incompatible"),
+                "{medium}"
+            );
+        }
+    }
+
+    #[test]
     fn hybrid_removal_before_the_groups_first_store_is_forwarded() {
         // A normalizer attached after the store knows no group kinds, and the
         // removal carries none. KVCR residency outlives the attachment, so the
