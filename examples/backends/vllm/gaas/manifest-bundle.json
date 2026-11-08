@@ -311,6 +311,9 @@
           "VllmWorkerA": {
             "componentType": "worker",
             "replicas": 1,
+            "sharedMemory": {
+              "size": "64Gi"
+            },
             "runtimeVersionOverride": "1.7.0",
             "extraPodSpec": {
               "nodeSelector": {
@@ -509,12 +512,12 @@
                 "resources": {
                   "requests": {
                     "cpu": "4",
-                    "memory": "16Gi",
+                    "memory": "96Gi",
                     "nvidia.com/gpu": "1"
                   },
                   "limits": {
                     "cpu": "8",
-                    "memory": "16Gi",
+                    "memory": "96Gi",
                     "nvidia.com/gpu": "1"
                   }
                 },
@@ -559,6 +562,9 @@
           "VllmWorkerB": {
             "componentType": "worker",
             "replicas": 1,
+            "sharedMemory": {
+              "size": "64Gi"
+            },
             "runtimeVersionOverride": "1.7.0",
             "extraPodSpec": {
               "nodeSelector": {
@@ -757,12 +763,12 @@
                 "resources": {
                   "requests": {
                     "cpu": "4",
-                    "memory": "16Gi",
+                    "memory": "96Gi",
                     "nvidia.com/gpu": "1"
                   },
                   "limits": {
                     "cpu": "8",
-                    "memory": "16Gi",
+                    "memory": "96Gi",
                     "nvidia.com/gpu": "1"
                   }
                 },
