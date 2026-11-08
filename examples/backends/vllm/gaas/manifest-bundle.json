@@ -452,9 +452,9 @@
                   "${GAAS_CPU_PRIMARY_BYTES}",
                   "--",
                   "--model",
+                  "/model-cache/Qwen3.8-27B-FP8",
+                  "--served-model-name",
                   "${GAAS_MODEL}",
-                  "--revision",
-                  "${GAAS_MODEL_REVISION}",
                   "--tensor-parallel-size",
                   "1",
                   "--pipeline-parallel-size",
@@ -538,10 +538,22 @@
                     "name": "claim",
                     "mountPath": "/run/gaas",
                     "readOnly": true
+                  },
+                  {
+                    "name": "model-cache",
+                    "mountPath": "/model-cache",
+                    "readOnly": true
                   }
                 ]
               },
               "volumes": [
+                {
+                  "name": "model-cache",
+                  "persistentVolumeClaim": {
+                    "claimName": "shared-model-cache",
+                    "readOnly": true
+                  }
+                },
                 {
                   "name": "socket-directory",
                   "hostPath": {
@@ -703,9 +715,9 @@
                   "${GAAS_CPU_PRIMARY_BYTES}",
                   "--",
                   "--model",
+                  "/model-cache/Qwen3.8-27B-FP8",
+                  "--served-model-name",
                   "${GAAS_MODEL}",
-                  "--revision",
-                  "${GAAS_MODEL_REVISION}",
                   "--tensor-parallel-size",
                   "1",
                   "--pipeline-parallel-size",
@@ -789,10 +801,22 @@
                     "name": "claim",
                     "mountPath": "/run/gaas",
                     "readOnly": true
+                  },
+                  {
+                    "name": "model-cache",
+                    "mountPath": "/model-cache",
+                    "readOnly": true
                   }
                 ]
               },
               "volumes": [
+                {
+                  "name": "model-cache",
+                  "persistentVolumeClaim": {
+                    "claimName": "shared-model-cache",
+                    "readOnly": true
+                  }
+                },
                 {
                   "name": "socket-directory",
                   "hostPath": {

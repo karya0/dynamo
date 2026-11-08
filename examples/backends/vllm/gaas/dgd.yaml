@@ -139,10 +139,11 @@ spec:
             - --cpu-bytes
             - "${GAAS_CPU_PRIMARY_BYTES}"
             - --
+            # Weights come from the shared model-cache PVC (no 28.75 GiB Hugging Face download per start).
             - --model
+            - /model-cache/Qwen3.8-27B-FP8
+            - --served-model-name
             - "${GAAS_MODEL}"
-            - --revision
-            - "${GAAS_MODEL_REVISION}"
             - --tensor-parallel-size
             - "1"
             - --pipeline-parallel-size
@@ -197,7 +198,14 @@ spec:
             - name: claim
               mountPath: /run/gaas
               readOnly: true
+            - name: model-cache
+              mountPath: /model-cache
+              readOnly: true
         volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: shared-model-cache
+              readOnly: true
           - name: socket-directory
             hostPath:
               path: /dev/shm
@@ -310,10 +318,11 @@ spec:
             - --cpu-bytes
             - "${GAAS_CPU_PRIMARY_BYTES}"
             - --
+            # Weights come from the shared model-cache PVC (no 28.75 GiB Hugging Face download per start).
             - --model
+            - /model-cache/Qwen3.8-27B-FP8
+            - --served-model-name
             - "${GAAS_MODEL}"
-            - --revision
-            - "${GAAS_MODEL_REVISION}"
             - --tensor-parallel-size
             - "1"
             - --pipeline-parallel-size
@@ -368,7 +377,14 @@ spec:
             - name: claim
               mountPath: /run/gaas
               readOnly: true
+            - name: model-cache
+              mountPath: /model-cache
+              readOnly: true
         volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: shared-model-cache
+              readOnly: true
           - name: socket-directory
             hostPath:
               path: /dev/shm

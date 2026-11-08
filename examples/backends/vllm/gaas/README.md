@@ -43,7 +43,7 @@ Render all of these variables before reviewing a deployment:
 | `GAAS_SOCKET_ROOT` | Short private directory under `/node-shm`; all socket paths must fit Linux's 108-byte limit |
 | `GAAS_IMAGE` | Consumer image reference pinned by digest, including the matching KVCR and `dynamo.gaas` changes |
 | `GAAS_COMPATIBILITY_DIGEST` | Stable model, layout and cache-format compatibility identity |
-| `GAAS_MODEL`, `GAAS_MODEL_REVISION` | Reviewed model and immutable revision |
+| `GAAS_MODEL`, `GAAS_MODEL_REVISION` | Reviewed model id (served name); weights load from the `shared-model-cache` PVC at `/model-cache/Qwen3.8-27B-FP8`; the revision is no longer used |
 | `GAAS_GPU_KV_BYTES`, `GAAS_MAX_MODEL_LEN` | Reviewed GPU KV-cache capacity and context limit |
 | `GAAS_POOL_SIZES_GB` | Supervisor `--pool-sizes-gb` (the pool layout; the supervisor runs two Guards, `--guard-count 2`) |
 | `GAAS_SLOT_CAP_BYTES` | Supervisor `--slot-cap-bytes`, the node's slot capacity |
