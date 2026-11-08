@@ -38,6 +38,10 @@ spec:
     VllmWorkerA:
       componentType: worker
       replicas: 1
+      # vLLM's CPU KV offload shared region (--cpu-bytes, GAAS_CPU_PRIMARY_BYTES) lives in the worker's /dev/shm; the operator sizes /dev/shm
+      # from this field, so keep it above that value. Memory limit must cover it (tmpfs pages charge this pod).
+      sharedMemory:
+        size: 64Gi
       runtimeVersionOverride: "1.7.0"
       extraPodSpec:
         nodeSelector:
@@ -177,11 +181,11 @@ spec:
           resources:
             requests:
               cpu: "4"
-              memory: 16Gi
+              memory: 96Gi
               nvidia.com/gpu: "1"
             limits:
               cpu: "8"
-              memory: 16Gi
+              memory: 96Gi
               nvidia.com/gpu: "1"
           securityContext:
             allowPrivilegeEscalation: false
@@ -205,6 +209,10 @@ spec:
     VllmWorkerB:
       componentType: worker
       replicas: 1
+      # vLLM's CPU KV offload shared region (--cpu-bytes, GAAS_CPU_PRIMARY_BYTES) lives in the worker's /dev/shm; the operator sizes /dev/shm
+      # from this field, so keep it above that value. Memory limit must cover it (tmpfs pages charge this pod).
+      sharedMemory:
+        size: 64Gi
       runtimeVersionOverride: "1.7.0"
       extraPodSpec:
         nodeSelector:
@@ -344,11 +352,11 @@ spec:
           resources:
             requests:
               cpu: "4"
-              memory: 16Gi
+              memory: 96Gi
               nvidia.com/gpu: "1"
             limits:
               cpu: "8"
-              memory: 16Gi
+              memory: 96Gi
               nvidia.com/gpu: "1"
           securityContext:
             allowPrivilegeEscalation: false
