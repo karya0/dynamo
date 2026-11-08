@@ -31,10 +31,12 @@ such as `control_advertise_host` in the linker configuration. See the
 a complete example.
 
 For either path, enable KV events with a ZMQ publisher and `"format": "dynamo"`.
-Start a state-agent host in the workers' namespace before starting the workers:
+Start a state-agent host in the workers' namespace before starting the workers;
+set `DYN_NAMESPACE` and `DYN_NAMESPACE_WORKER_SUFFIX` exactly as the workers do;
+the agent derives the worker namespace:
 
 ```bash
-DYN_NAMESPACE=<worker-namespace> python -m dynamo.kv_state_agent
+DYN_NAMESPACE=<base-namespace> DYN_NAMESPACE_WORKER_SUFFIX=<worker-suffix> python -m dynamo.kv_state_agent
 ```
 
 The worker reads the raw-event endpoint, incarnation-specific topic, cache owner,

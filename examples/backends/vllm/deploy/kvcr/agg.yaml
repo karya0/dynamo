@@ -41,10 +41,7 @@ spec:
         - args:
           - |
             set -euo pipefail
-            state_namespace=$DYN_NAMESPACE
-            if [ -n "${DYN_NAMESPACE_WORKER_SUFFIX:-}" ]; then
-              state_namespace="${state_namespace}-${DYN_NAMESPACE_WORKER_SUFFIX}"
-            fi
+            # kv_state_agent derives the worker namespace from DYN_NAMESPACE and DYN_NAMESPACE_WORKER_SUFFIX itself (since d45c2523).
 
             state_agent_pid=
             vllm_pid=
@@ -61,7 +58,6 @@ spec:
                 DYN_COMPONENT=kv_state_agent \
                 DYN_DISCOVERY_BACKEND=etcd \
                 DYN_HEALTH_CHECK_ENABLED=false \
-                DYN_NAMESPACE="$state_namespace" \
                 DYN_SYSTEM_PORT=9091 \
                 python3 -m dynamo.kv_state_agent \
                   --max-slots "$KVCR_CACHE_SLOT_COUNT" &

@@ -160,10 +160,7 @@ spec:
         - args:
           - |
             set -euo pipefail
-            state_namespace=$DYN_NAMESPACE
-            if [ -n "${DYN_NAMESPACE_WORKER_SUFFIX:-}" ]; then
-              state_namespace="${state_namespace}-${DYN_NAMESPACE_WORKER_SUFFIX}"
-            fi
+            # kv_state_agent derives the worker namespace from DYN_NAMESPACE and DYN_NAMESPACE_WORKER_SUFFIX itself (since d45c2523).
 
             kvcr_pid=
             state_agent_pid=
@@ -183,8 +180,7 @@ spec:
               --compatibility-digest "${DYNAMO_KVCR_COMPATIBILITY_DIGEST}" &
             kvcr_pid=$!
             if [ "$POD_INDEX" = "0" ]; then
-              env DYN_NAMESPACE="$state_namespace" \
-                DYN_HEALTH_CHECK_ENABLED=false \
+              env DYN_HEALTH_CHECK_ENABLED=false \
                 python3 -m dynamo.kv_state_agent \
                   --max-slots "$KVCR_CACHE_SLOT_COUNT" &
               state_agent_pid=$!
