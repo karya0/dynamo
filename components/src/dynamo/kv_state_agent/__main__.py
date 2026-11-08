@@ -6,11 +6,11 @@
 import argparse
 import asyncio
 import logging
-import os
 from typing import Any
 
 import uvloop
 
+from dynamo.common.utils.namespace import get_worker_namespace
 from dynamo.llm import KvStateAgentHost
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -60,7 +60,9 @@ async def worker(runtime: DistributedRuntime) -> None:
     if args.slots_per_socket <= 0:
         raise ValueError("--slots-per-socket must be greater than zero")
 
-    namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
+    # Workers resolve their namespace with DYN_NAMESPACE_WORKER_SUFFIX; the
+    # host must advertise in the same one or workers never discover it.
+    namespace = get_worker_namespace()
     host = KvStateAgentHost(
         runtime.endpoint(f"{namespace}.kv_state_agent.control"),
         args.max_slots,
