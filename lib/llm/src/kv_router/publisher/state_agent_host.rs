@@ -1042,7 +1042,11 @@ mod tests {
             KvIndexer, KvIndexerMetrics, LowerTierIndexers, LowerTierQueryOptions, MatchDetails,
             query_lower_tiers_with_options,
         };
-        use dynamo_kv_router::protocols::{KvCacheEventData, LocalBlockHash, StorageTier};
+        use dynamo_kv_router::kv_hints::KvTransferCandidateSource;
+        use dynamo_kv_router::protocols::{
+            ExternalSequenceBlockHash, KvCacheEventData, LocalBlockHash, ResidencyOwner,
+            StorageTier,
+        };
 
         let component = DistributedRuntime::new(
             Runtime::from_current().unwrap(),
@@ -1216,10 +1220,15 @@ mod tests {
             .iter()
             .map(|block| block.tokens_hash)
             .collect();
+        let block_hashes: Vec<ExternalSequenceBlockHash> =
+            stored.blocks.iter().map(|block| block.block_hash).collect();
         assert_eq!(tokens.len(), 2);
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let owner_key = KvTransferCandidateSource::CacheOwner(
+            ResidencyOwner::cache_owner(request.cache_owner_id).compact_key(),
+        );
+        let candidates = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
-                let matches = query_lower_tiers_with_options(
+                let mut matches = query_lower_tiers_with_options(
                     &lower_tier,
                     &tokens,
                     &MatchDetails::default(),
@@ -1227,20 +1236,24 @@ mod tests {
                         retain_kv_transfer_chain: true,
                     },
                 );
-                if let Some(details) = matches.get(&StorageTier::HostPinned)
-                    && let Some(candidates) = &details.kv_transfer_candidates
+                if let Some(candidates) = matches
+                    .remove(&StorageTier::HostPinned)
+                    .and_then(|details| details.kv_transfer_candidates)
                     && candidates
                         .owner_prefix_blocks
                         .iter()
-                        .any(|(_, blocks)| *blocks == 2)
+                        .any(|(source, blocks)| *source == owner_key && *blocks == 2)
                 {
-                    break;
+                    break candidates;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         })
         .await
         .expect("fresh router did not recover both detached owner blocks");
+        // The detached owner alone holds both blocks: no stale or obsolete candidate remains.
+        assert_eq!(candidates.owner_prefix_blocks, vec![(owner_key, 2)]);
+        assert_eq!(candidates.block_hashes, block_hashes);
         cancel.cancel();
         drop(router);
         agent.shutdown().await.unwrap();
