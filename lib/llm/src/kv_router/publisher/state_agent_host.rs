@@ -878,7 +878,38 @@ mod tests {
         }
     }
 
+    /// The process-wide TCP request-plane server runs its accept loop on the
+    /// runtime that first starts it, and these tests drop their runtimes. Start it
+    /// once on a runtime that lives for the whole test process, so a test that
+    /// drops its runtime cannot leave a later test querying an unserved port.
+    fn start_process_request_plane() {
+        static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        STARTED.get_or_init(|| {
+            std::thread::spawn(|| {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async {
+                    let drt = DistributedRuntime::new(
+                        Runtime::from_current().unwrap(),
+                        DistributedConfig::process_local(),
+                    )
+                    .await
+                    .unwrap();
+                    drt.request_plane_server().await.unwrap();
+                    std::mem::forget(drt);
+                });
+                std::mem::forget(runtime);
+            })
+            .join()
+            .unwrap();
+        });
+    }
+
     async fn test_component() -> Component {
+        start_process_request_plane();
         DistributedRuntime::new(
             Runtime::from_current().unwrap(),
             DistributedConfig::process_local(),
@@ -1048,6 +1079,7 @@ mod tests {
             StorageTier,
         };
 
+        start_process_request_plane();
         let component = DistributedRuntime::new(
             Runtime::from_current().unwrap(),
             DistributedConfig::process_local(),
