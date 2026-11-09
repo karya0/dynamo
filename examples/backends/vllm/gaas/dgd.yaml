@@ -397,38 +397,3 @@ spec:
             emptyDir:
               medium: Memory
               sizeLimit: 1Mi
-    KvStateAgent:
-      componentType: worker
-      replicas: 1
-      runtimeVersionOverride: "1.7.0"
-      extraPodSpec:
-        nodeSelector:
-          kubernetes.io/hostname: "${GAAS_NODE}"
-        tolerations:
-          - key: nvidia.com/gpu
-            operator: Equal
-            value: "true"
-            effect: NoSchedule
-        imagePullSecrets:
-          - name: nvcrimagepullsecret
-        mainContainer:
-          name: main
-          image: ${GAAS_IMAGE}
-          command: [python3, -m, dynamo.kv_state_agent]
-          args:
-            - --max-slots
-            - "2"
-          env:
-            - name: DYN_COMPONENT
-              value: kv_state_agent
-            # The operator injects DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS='["generate"]'
-            # for workers; this agent serves no "generate" endpoint, so an empty
-            # value makes /health report runtime liveness instead.
-            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-              value: ""
-            - name: DYN_LOG
-              value: debug
-            - name: DYN_HEALTH_CHECK_ENABLED
-              value: "false"
-            - name: NVIDIA_VISIBLE_DEVICES
-              value: void

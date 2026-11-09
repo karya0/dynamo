@@ -34,6 +34,22 @@
             "create",
             "delete"
           ]
+        },
+        {
+          "apiGroups": [
+            "nvidia.com"
+          ],
+          "resources": [
+            "dynamoworkermetadatas"
+          ],
+          "verbs": [
+            "create",
+            "get",
+            "list",
+            "watch",
+            "delete",
+            "patch"
+          ]
         }
       ]
     },
@@ -73,7 +89,10 @@
         "template": {
           "metadata": {
             "labels": {
-              "app": "${GAAS_NAME}-guard"
+              "app": "${GAAS_NAME}-guard",
+              "nvidia.com/dynamo-discovery-backend": "kubernetes",
+              "nvidia.com/dynamo-discovery-enabled": "true",
+              "nvidia.com/dynamo-namespace": "${GAAS_NAMESPACE}-${GAAS_NAME}"
             }
           },
           "spec": {
@@ -175,9 +194,39 @@
                   "${GAAS_SOCKET_ROOT}/slots",
                   "--manager-id",
                   "${GAAS_NAME}",
+                  "--state-agent-mode",
+                  "supervisor",
                   "--disable-hugepages"
                 ],
                 "env": [
+                  {
+                    "name": "DYN_DISCOVERY_BACKEND",
+                    "value": "kubernetes"
+                  },
+                  {
+                    "name": "DYN_KUBE_DISCOVERY_MODE",
+                    "value": "container"
+                  },
+                  {
+                    "name": "POD_NAME",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "fieldPath": "metadata.name"
+                      }
+                    }
+                  },
+                  {
+                    "name": "POD_UID",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "fieldPath": "metadata.uid"
+                      }
+                    }
+                  },
+                  {
+                    "name": "CONTAINER_NAME",
+                    "value": "supervisor"
+                  },
                   {
                     "name": "POD_NAMESPACE",
                     "valueFrom": {
@@ -842,64 +891,6 @@
                   }
                 }
               ]
-            }
-          },
-          "KvStateAgent": {
-            "componentType": "worker",
-            "replicas": 1,
-            "runtimeVersionOverride": "1.7.0",
-            "extraPodSpec": {
-              "nodeSelector": {
-                "kubernetes.io/hostname": "${GAAS_NODE}"
-              },
-              "tolerations": [
-                {
-                  "key": "nvidia.com/gpu",
-                  "operator": "Equal",
-                  "value": "true",
-                  "effect": "NoSchedule"
-                }
-              ],
-              "imagePullSecrets": [
-                {
-                  "name": "nvcrimagepullsecret"
-                }
-              ],
-              "mainContainer": {
-                "name": "main",
-                "image": "${GAAS_IMAGE}",
-                "command": [
-                  "python3",
-                  "-m",
-                  "dynamo.kv_state_agent"
-                ],
-                "args": [
-                  "--max-slots",
-                  "2"
-                ],
-                "env": [
-                  {
-                    "name": "DYN_COMPONENT",
-                    "value": "kv_state_agent"
-                  },
-                  {
-                    "name": "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
-                    "value": ""
-                  },
-                  {
-                    "name": "DYN_LOG",
-                    "value": "debug"
-                  },
-                  {
-                    "name": "DYN_HEALTH_CHECK_ENABLED",
-                    "value": "false"
-                  },
-                  {
-                    "name": "NVIDIA_VISIBLE_DEVICES",
-                    "value": "void"
-                  }
-                ]
-              }
             }
           }
         }
