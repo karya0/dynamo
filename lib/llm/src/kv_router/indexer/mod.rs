@@ -51,7 +51,7 @@ pub(crate) use recovery::{
     start_worker_kv_query_endpoint_with_status,
 };
 #[cfg(test)]
-pub(crate) use recovery::{WorkerQueryClient, WorkerQueryTransport};
+pub(crate) use recovery::{WorkerQueryClient, WorkerQueryTransport, start_state_agent_router};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResolvedApproximatePrimaryPolicy {

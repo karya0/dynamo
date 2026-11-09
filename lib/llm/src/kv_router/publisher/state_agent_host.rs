@@ -1033,6 +1033,219 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn fresh_router_recovers_detached_host_slot() {
+        use crate::discovery::{KvSourceMembershipView, KvStateEndpointResolution};
+        use crate::kv_router::indexer::{Indexer, start_state_agent_router};
+        use crate::utils::zmq::{bind_pub_socket, send_multipart};
+        use dynamo_kv_router::indexer::{
+            KvIndexer, KvIndexerMetrics, LowerTierIndexers, LowerTierQueryOptions, MatchDetails,
+            query_lower_tiers_with_options,
+        };
+        use dynamo_kv_router::protocols::{KvCacheEventData, LocalBlockHash, StorageTier};
+
+        let component = DistributedRuntime::new(
+            Runtime::from_current().unwrap(),
+            DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap()
+        .namespace("warm-replacement-detached-recovery")
+        .unwrap()
+        .component("host")
+        .unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let raw_endpoint = format!("tcp://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let raw = bind_pub_socket(&raw_endpoint).await.unwrap();
+        let worker = WorkerWithDpRank::new(17, 4);
+        let mut request = intent(
+            &instance("kv_state_agent", 1),
+            instance("producer", 11),
+            owner(4),
+            worker,
+            101,
+        );
+        request.raw_zmq_endpoint = raw_endpoint;
+        request.kv_state_endpoint =
+            EndpointId::from("warm-replacement-detached-recovery.backend.generate");
+        request.kv_block_size = 4;
+        request.router_hint_source = Some(RouterHintSourceMetadata {
+            source_control_endpoint: "tcp://persistent-owner:23280".to_string(),
+            worker_type: "prefill".to_string(),
+            topology_domains: Default::default(),
+        });
+        let mut slots = HashMap::new();
+        let mut sockets = HostSockets::new(&component, 1, CancellationToken::new()).unwrap();
+        let metrics = HostMetrics::new(&component).unwrap();
+        reconcile_owner(
+            &component,
+            request.cache_owner_id,
+            &HashMap::from([(
+                request.cache_owner_id,
+                HashMap::from([(101, request.clone())]),
+            )]),
+            &mut slots,
+            1,
+            &mut sockets,
+            &mut 0,
+            &metrics,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            slots[&request.cache_owner_id].lifecycle,
+            SlotLifecycle::Active
+        );
+        let agent = slots[&request.cache_owner_id]
+            .agent
+            .as_ref()
+            .unwrap()
+            .clone();
+        // A real framework event populates the host's recovery index before detach.
+        let payload = rmp_serde::to_vec_named(&(
+            1.0f64,
+            vec![serde_json::json!({
+                "type": "BlockStored", "block_hashes": [101, 102], "parent_block_hash": null,
+                "token_ids": [10,11,12,13,14,15,16,17], "block_size": 4,
+                "medium": "CPU_PINNED", "ownership": "kvcr", "locality": "LOCAL"
+            })],
+            Some(4i32),
+        ))
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let before = agent.status().outbound_cursor;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut sequence = 1u64;
+            while agent.status().outbound_cursor == before {
+                send_multipart(
+                    &raw,
+                    vec![
+                        request.raw_topic.as_bytes().to_vec(),
+                        sequence.to_be_bytes().to_vec(),
+                        payload.clone(),
+                    ],
+                )
+                .await
+                .unwrap();
+                sequence += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("host did not index framework blocks");
+        reconcile_owner(
+            &component,
+            request.cache_owner_id,
+            &HashMap::new(),
+            &mut slots,
+            1,
+            &mut sockets,
+            &mut 0,
+            &metrics,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            slots[&request.cache_owner_id].lifecycle,
+            SlotLifecycle::Detached
+        );
+        assert!(agent.status().attachment.is_none());
+
+        // Start a fresh subscriber only after detach: live Store delivery cannot satisfy this.
+        let cancel = CancellationToken::new();
+        let primary = KvIndexer::new(
+            cancel.child_token(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+        );
+        let lower_tier = LowerTierIndexers::new(1, 4);
+        let indexer = Indexer::Single {
+            primary,
+            lower_tier: lower_tier.clone(),
+            approx: None,
+            primary_records_routing_decisions: false,
+            session_updates: None,
+        };
+        let (_membership_tx, membership) = tokio::sync::watch::channel(KvSourceMembershipView {
+            serving_endpoint: request.kv_state_endpoint.clone(),
+            endpoint_resolution: KvStateEndpointResolution::Resolved(
+                request.kv_state_endpoint.clone(),
+            ),
+            sources: HashMap::new(),
+            kv_event_publishing_enabled: HashMap::new(),
+            kv_event_source_mode: HashMap::new(),
+            recovery_expected: HashMap::new(),
+        });
+        let (_configs_tx, configs) = tokio::sync::watch::channel(HashMap::new());
+        let coordinator = crate::discovery::KvSourceMembershipCoordinator::start(
+            request.kv_state_endpoint.clone(),
+            configs,
+            component.drt().discovery(),
+        );
+        let membership = coordinator.subscribe().with_receiver(membership);
+        let router =
+            start_state_agent_router(component.clone(), indexer, membership, 4, cancel.clone())
+                .await
+                .unwrap();
+        let hashes = crate::kv_router::publisher::zmq_listener::decode_zmq_kv_batch(vec![
+            Vec::new(),
+            1u64.to_be_bytes().to_vec(),
+            payload,
+        ])
+        .unwrap();
+        // Use the normalizer's exact token hashes rather than duplicating its hashing contract.
+        let mut normalizer = dynamo_kv_router::zmq_wire::ZmqEventNormalizer::new(4);
+        let mut raw_event = hashes.batch.events.into_iter().next().unwrap();
+        if let dynamo_kv_router::zmq_wire::RawKvEvent::BlockStored { ownership, .. } =
+            &mut raw_event
+        {
+            *ownership = None;
+        }
+        let preprocessed = normalizer
+            .preprocess_with_reason(raw_event, worker)
+            .unwrap();
+        let normalized = normalizer
+            .normalize_preprocessed(preprocessed, 1, worker)
+            .unwrap();
+        let KvCacheEventData::Stored(stored) = normalized.event.data else {
+            panic!("expected Store")
+        };
+        let tokens: Vec<LocalBlockHash> = stored
+            .blocks
+            .iter()
+            .map(|block| block.tokens_hash)
+            .collect();
+        assert_eq!(tokens.len(), 2);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let matches = query_lower_tiers_with_options(
+                    &lower_tier,
+                    &tokens,
+                    &MatchDetails::default(),
+                    LowerTierQueryOptions {
+                        retain_kv_transfer_chain: true,
+                    },
+                );
+                if let Some(details) = matches.get(&StorageTier::HostPinned)
+                    && let Some(candidates) = &details.kv_transfer_candidates
+                    && candidates
+                        .owner_prefix_blocks
+                        .iter()
+                        .any(|(_, blocks)| *blocks == 2)
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("fresh router did not recover both detached owner blocks");
+        cancel.cancel();
+        drop(router);
+        agent.shutdown().await.unwrap();
+    }
+
     fn instance(component: &str, instance_id: u64) -> Instance {
         Instance {
             namespace: "ns".to_string(),
