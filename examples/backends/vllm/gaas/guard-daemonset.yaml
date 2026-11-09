@@ -18,6 +18,9 @@ rules:
     resources: [pods]
     verbs: [get, list, watch, create, delete]
   - apiGroups: [nvidia.com]
+    resources: [dynamographdeployments]
+    verbs: [get, list]
+  - apiGroups: [nvidia.com]
     resources: [dynamoworkermetadatas]
     verbs: [create, get, list, watch, delete, patch]
 ---

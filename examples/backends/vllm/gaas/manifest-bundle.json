@@ -40,6 +40,18 @@
             "nvidia.com"
           ],
           "resources": [
+            "dynamographdeployments"
+          ],
+          "verbs": [
+            "get",
+            "list"
+          ]
+        },
+        {
+          "apiGroups": [
+            "nvidia.com"
+          ],
+          "resources": [
             "dynamoworkermetadatas"
           ],
           "verbs": [
