@@ -559,6 +559,10 @@
                     "value": "DEBUG"
                   },
                   {
+                    "name": "KVCR_DIAGNOSTICS",
+                    "value": "1"
+                  },
+                  {
                     "name": "DYN_LOG",
                     "value": "info,remote_fw_dram=debug,remote_ops=debug"
                   },
@@ -825,6 +829,10 @@
                   {
                     "name": "KVCR_LOG_LEVEL",
                     "value": "DEBUG"
+                  },
+                  {
+                    "name": "KVCR_DIAGNOSTICS",
+                    "value": "1"
                   },
                   {
                     "name": "DYN_LOG",

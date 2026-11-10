@@ -173,6 +173,8 @@ spec:
             # The KVCR runtime emits its transfer events in the vLLM EngineCore child process, where Dynamo's log bridge is not installed; the KVCR library attaches its own handler when KVCR_LOG_LEVEL is set (KVCR >= the commit following 3371ca9), while DYN_LOG covers records emitted in the parent.
             - name: KVCR_LOG_LEVEL
               value: DEBUG
+            - name: KVCR_DIAGNOSTICS
+              value: "1"
             - name: DYN_LOG
               value: info,remote_fw_dram=debug,remote_ops=debug
             - name: HF_HOME
@@ -354,6 +356,8 @@ spec:
             # The KVCR runtime emits its transfer events in the vLLM EngineCore child process, where Dynamo's log bridge is not installed; the KVCR library attaches its own handler when KVCR_LOG_LEVEL is set (KVCR >= the commit following 3371ca9), while DYN_LOG covers records emitted in the parent.
             - name: KVCR_LOG_LEVEL
               value: DEBUG
+            - name: KVCR_DIAGNOSTICS
+              value: "1"
             - name: DYN_LOG
               value: info,remote_fw_dram=debug,remote_ops=debug
             - name: HF_HOME
