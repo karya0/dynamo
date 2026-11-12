@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Experimental template; this requests two single-GPU workers only after explicit approval.
+# Experimental template; this requests three single-GPU workers only after explicit approval.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -604,7 +604,7 @@ spec:
           command: [python3, -m, dynamo.kv_state_agent]
           args:
             - --max-slots
-            - "2"
+            - "3"
           env:
             - name: DYN_COMPONENT
               value: kv_state_agent

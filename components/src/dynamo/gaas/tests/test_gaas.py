@@ -545,7 +545,7 @@ def test_repository_root_skips_only_without_a_checkout(tmp_path):
     assert _repository_root(start) == tmp_path  # examples/ absent: tests will fail
 
 
-def test_canonical_templates_match_yaml_and_single_worker_contract():
+def test_canonical_templates_match_yaml_and_three_worker_contract():
     root = _repository_root()
     examples = root / "examples/backends/vllm/gaas"
     bundle = json.loads((examples / "manifest-bundle.json").read_text())
@@ -593,7 +593,11 @@ def test_canonical_templates_match_yaml_and_single_worker_contract():
         "-m",
         "dynamo.kv_state_agent",
     ]
-    for index, name in enumerate(("VllmWorkerA", "VllmWorkerB", "VllmWorkerC")):
+    worker_names = ("VllmWorkerA", "VllmWorkerB", "VllmWorkerC")
+    assert set(services) == {"Frontend", *worker_names, "KvStateAgent"}
+    agent_args = services["KvStateAgent"]["extraPodSpec"]["mainContainer"]["args"]
+    assert agent_args[agent_args.index("--max-slots") + 1] == str(len(worker_names))
+    for index, name in enumerate(worker_names):
         service = services[name]
         assert service["replicas"] == 1
         worker = service["extraPodSpec"]
