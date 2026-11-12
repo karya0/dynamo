@@ -161,6 +161,8 @@ spec:
             - --enable-prefix-caching
             - --kv-events-config
             - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:23080","enable_kv_cache_events":true}'
+            - --kv-transfer-config
+            - '{"kv_connector_extra_config":{"secondary_tiers":[{"type":"kvcr","operation_timeout_ms":5000,"abandon_timeout_ms":10000}]}}'
           env:
             - name: GAAS_ADVERTISE_HOST
               valueFrom:
@@ -342,6 +344,8 @@ spec:
             - --enable-prefix-caching
             - --kv-events-config
             - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:23080","enable_kv_cache_events":true}'
+            - --kv-transfer-config
+            - '{"kv_connector_extra_config":{"secondary_tiers":[{"type":"kvcr","operation_timeout_ms":5000,"abandon_timeout_ms":10000}]}}'
           env:
             - name: GAAS_ADVERTISE_HOST
               valueFrom:

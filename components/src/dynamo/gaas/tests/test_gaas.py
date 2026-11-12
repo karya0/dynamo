@@ -253,6 +253,25 @@ def test_merge_preserves_user_settings(descriptor):
     assert new["kv_connector_extra_config"]["secondary_tiers"][0]["enable_telemetry"]
 
 
+def test_bundle_worker_tier_timeouts_survive_merge(descriptor):
+    bundle = json.loads(
+        (
+            _repository_root() / "examples/backends/vllm/gaas/manifest-bundle.json"
+        ).read_text()
+    )
+    services = bundle["resources"][-1]["spec"]["services"]
+    for name in ("VllmWorkerA", "VllmWorkerB"):
+        args = services[name]["extraPodSpec"]["mainContainer"]["args"]
+        backend = args[args.index("--") + 1 :]
+        merged = json.loads(launch_argv(descriptor, 4096, backend)[-1])
+        (tier,) = merged["kv_connector_extra_config"]["secondary_tiers"]
+        assert tier["type"] == "kvcr"
+        assert tier["operation_timeout_ms"] == 5000
+        assert tier["abandon_timeout_ms"] == 10000
+        assert tier["control_ports"] == [descriptor["control_port"]]
+        assert tier["kvcr_service_socket_path"] == descriptor["service_socket_path"]
+
+
 @pytest.mark.parametrize(
     "old",
     [
