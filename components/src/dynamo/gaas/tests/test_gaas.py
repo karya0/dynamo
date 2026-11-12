@@ -579,10 +579,30 @@ def test_canonical_templates_match_yaml_and_single_worker_contract():
         "valueFrom": {"fieldRef": {"fieldPath": "status.hostIP"}},
     } in supervisor["env"]
     assert supervisor["args"][supervisor["args"].index("--guard-count") + 1] == "2"
-    assert services["KvStateAgent"]["extraPodSpec"]["mainContainer"]["command"] == [
-        "python3",
-        "-m",
-        "dynamo.kv_state_agent",
+    # The state agent runs inside the Guard supervisor, not as a DGD service.
+    assert "KvStateAgent" not in services
+    assert (
+        supervisor["args"][supervisor["args"].index("--state-agent-mode") + 1]
+        == "supervisor"
+    )
+    assert yaml_resources[3]["spec"]["template"]["metadata"]["labels"] == {
+        "app": "${GAAS_NAME}-guard",
+        "nvidia.com/dynamo-discovery-backend": "kubernetes",
+        "nvidia.com/dynamo-discovery-enabled": "true",
+        "nvidia.com/dynamo-namespace": "${GAAS_NAMESPACE}-${GAAS_NAME}",
+    }
+    assert supervisor["env"][:5] == [
+        {"name": "DYN_DISCOVERY_BACKEND", "value": "kubernetes"},
+        {"name": "DYN_KUBE_DISCOVERY_MODE", "value": "container"},
+        {
+            "name": "POD_NAME",
+            "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}},
+        },
+        {
+            "name": "POD_UID",
+            "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}},
+        },
+        {"name": "CONTAINER_NAME", "value": "supervisor"},
     ]
     for index, name in enumerate(("VllmWorkerA", "VllmWorkerB")):
         service = services[name]
@@ -609,22 +629,7 @@ def test_canonical_templates_match_yaml_and_single_worker_contract():
             "value": "info,remote_fw_dram=debug,remote_ops=debug",
         } in main["env"]
         assert {"name": "KVCR_LOG_LEVEL", "value": "DEBUG"} in main["env"]
-    agent = services["KvStateAgent"]["extraPodSpec"]
-    assert agent["tolerations"] == [
-        {
-            "key": "nvidia.com/gpu",
-            "operator": "Equal",
-            "value": "true",
-            "effect": "NoSchedule",
-        }
-    ]
-    assert "nvidia.com/gpu" not in agent["mainContainer"].get("resources", {}).get(
-        "limits", {}
-    )
     assert {"name": "KVCR_LOG_LEVEL", "value": "DEBUG"} in supervisor["env"]
-    agent_env = agent["mainContainer"]["env"]
-    assert {"name": "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", "value": ""} in agent_env
-    assert {"name": "DYN_LOG", "value": "debug"} in agent_env
 
 
 def test_rendered_dgd_matches_repository_crd_schema():
