@@ -888,6 +888,37 @@ def test_v2_launch_passes_gaas_settings_without_a_holder_address(
     assert extra["dynamo_state_agent"]["cache_owner_ids"]["0"].endswith("/" + "0" * 32)
 
 
+def test_v2_state_agent_launch_drops_worker_namespace_suffix(
+    tmp_path, service_socket, v2_claim, monkeypatch
+):
+    descriptor = {**v2_claim, "state": "ready", "control_port": 55001, "guard_index": 0}
+    claim_file = tmp_path / "claim.json"
+    claim_file.write_text(json.dumps(descriptor))
+    seen = []
+    monkeypatch.setattr(
+        os,
+        "execv",
+        lambda exe, args: seen.append(os.environ.get("DYN_NAMESPACE_WORKER_SUFFIX")),
+    )
+    for flags in (("--raw-advertise-host", "10.9.9.9", "--state-agent"), ()):
+        monkeypatch.setenv("DYN_NAMESPACE_WORKER_SUFFIX", "abc123")
+        launch = _v2_args(
+            "launch",
+            claim_file,
+            service_socket,
+            "--cpu-bytes",
+            "4096",
+            "--advertise-host",
+            "10.0.0.1",
+            *flags,
+            "--",
+            "--model",
+            "m",
+        )
+        assert main(launch, ensure_pool=None) == 0
+    assert seen == [None, "abc123"]
+
+
 def test_v2_guard_index_selects_port_and_claim_file(
     tmp_path, service_socket, v2_claim
 ):

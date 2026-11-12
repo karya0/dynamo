@@ -524,5 +524,9 @@ def main(argv: Sequence[str] | None = None, *, ensure_pool: EnsurePool) -> int:
         state_agent=args.state_agent,
         raw_advertise_host=args.raw_advertise_host,
     )
+    if args.state_agent:
+        # The supervisor's state agent advertises in the base namespace; the
+        # operator's per-generation worker suffix would hide it from the worker.
+        os.environ.pop("DYN_NAMESPACE_WORKER_SUFFIX", None)
     os.execv(command[0], command)
     return 0
