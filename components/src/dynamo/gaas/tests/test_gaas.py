@@ -548,7 +548,17 @@ def test_canonical_templates_match_yaml_and_single_worker_contract():
             "apiGroups": [""],
             "resources": ["pods"],
             "verbs": ["get", "list", "watch", "create", "delete"],
-        }
+        },
+        {
+            "apiGroups": ["nvidia.com"],
+            "resources": ["dynamographdeployments"],
+            "verbs": ["get", "list"],
+        },
+        {
+            "apiGroups": ["nvidia.com"],
+            "resources": ["dynamoworkermetadatas"],
+            "verbs": ["create", "get", "list", "watch", "delete", "patch"],
+        },
     ]
     guard = yaml_resources[3]["spec"]["template"]["spec"]
     assert guard["nodeSelector"] == {"kubernetes.io/hostname": "${GAAS_NODE}"}
