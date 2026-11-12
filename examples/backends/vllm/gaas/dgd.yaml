@@ -157,7 +157,7 @@ spec:
             - --max-model-len
             - "${GAAS_MAX_MODEL_LEN}"
             - --max-num-seqs
-            - "1"
+            - "224"
             - --enable-prefix-caching
             - --kv-events-config
             - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:23080","enable_kv_cache_events":true}'
@@ -340,7 +340,7 @@ spec:
             - --max-model-len
             - "${GAAS_MAX_MODEL_LEN}"
             - --max-num-seqs
-            - "1"
+            - "224"
             - --enable-prefix-caching
             - --kv-events-config
             - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:23080","enable_kv_cache_events":true}'
@@ -523,7 +523,7 @@ spec:
             - --max-model-len
             - "${GAAS_MAX_MODEL_LEN}"
             - --max-num-seqs
-            - "1"
+            - "224"
             - --enable-prefix-caching
             - --kv-events-config
             - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:23080","enable_kv_cache_events":true}'

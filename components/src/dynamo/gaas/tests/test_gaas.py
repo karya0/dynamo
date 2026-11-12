@@ -613,6 +613,7 @@ def test_canonical_templates_match_yaml_and_three_worker_contract():
         for args in (worker["initContainers"][0]["args"], main["args"]):
             assert args[args.index("--guard-index") + 1] == str(index)
         assert "--state-agent" in main["args"]
+        assert main["args"][main["args"].index("--max-num-seqs") + 1] == "224"
         assert {
             "name": "POD_IP",
             "valueFrom": {"fieldRef": {"fieldPath": "status.podIP"}},
