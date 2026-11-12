@@ -221,7 +221,7 @@
                     "memory": "${GAAS_SUPERVISOR_MEMORY}"
                   },
                   "limits": {
-                    "cpu": "1",
+                    "cpu": "4",
                     "memory": "${GAAS_SUPERVISOR_MEMORY}"
                   }
                 },
