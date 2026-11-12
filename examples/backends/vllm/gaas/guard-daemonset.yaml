@@ -101,7 +101,7 @@ spec:
             - --pool-dir
             - ${GAAS_SOCKET_ROOT}/pools
             - --guard-count
-            - "2"
+            - "3"
             - --pool-sizes-gb
             - "${GAAS_POOL_SIZES_GB}"
             - --compatibility-digest

@@ -53,8 +53,8 @@ Render all of these variables before reviewing a deployment:
 
 The sample claims pool `h7-pool-a` with `GAAS_CLAIM_GB` GiB of data. A separate smaller claim
 (0.5 GiB minimum) can exercise independent reclamation. Each holder adds KVCR's 100 MiB journal
-and runtime headroom to its memory reservation. The service has two Guards (guard-count 2, slots 0 and 1, ports 55001/55002) and
-each of the two workers (`VllmWorkerA`, `VllmWorkerB`) uses TP=PP=DP=1 and its own Guard: `--guard-index N` and control port `55001 + N` (override with `--control-port`). The DaemonSet runs on the host network and the workers advertise the node's address through `GAAS_ADVERTISE_HOST` (`--advertise-host`); a v2 launch exits without it. `--state-agent` attaches each worker to the `KvStateAgent` service.
+and runtime headroom to its memory reservation. The service has three Guards (guard-count 3, slots 0 to 2, ports 55001 to 55003) and
+each of the three workers (`VllmWorkerA`, `VllmWorkerB`, `VllmWorkerC`) uses TP=PP=DP=1 and its own Guard: `--guard-index N` and control port `55001 + N` (override with `--control-port`). The DaemonSet runs on the host network and the workers advertise the node's address through `GAAS_ADVERTISE_HOST` (`--advertise-host`); a v2 launch exits without it. `--state-agent` attaches each worker to the `KvStateAgent` service.
 Runtime block layout comes from the worker's KV view stride, not the pool's
 capacity.
 
@@ -102,7 +102,7 @@ this template is therefore not a Baseline-compatible delivery solution. A
 platform-managed device plugin or DRA/CDI directory mount requires separate
 implementation and runtime validation.
 
-CPU roles disable GPU visibility. The worker template requests two single-GPU workers only;
+CPU roles disable GPU visibility. The worker template requests three single-GPU workers only;
 deploy it through a reviewed namespace-fenced launcher after resource approval.
 No cluster or GPU run is required to execute the wrapper's unit tests.
 

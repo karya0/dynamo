@@ -260,7 +260,7 @@ def test_bundle_worker_tier_timeouts_survive_merge(descriptor):
         ).read_text()
     )
     services = bundle["resources"][-1]["spec"]["services"]
-    for name in ("VllmWorkerA", "VllmWorkerB"):
+    for name in ("VllmWorkerA", "VllmWorkerB", "VllmWorkerC"):
         args = services[name]["extraPodSpec"]["mainContainer"]["args"]
         backend = args[args.index("--") + 1 :]
         merged = json.loads(launch_argv(descriptor, 4096, backend)[-1])
@@ -587,13 +587,13 @@ def test_canonical_templates_match_yaml_and_single_worker_contract():
         "name": "KVCR_ADVERTISE_HOST",
         "valueFrom": {"fieldRef": {"fieldPath": "status.hostIP"}},
     } in supervisor["env"]
-    assert supervisor["args"][supervisor["args"].index("--guard-count") + 1] == "2"
+    assert supervisor["args"][supervisor["args"].index("--guard-count") + 1] == "3"
     assert services["KvStateAgent"]["extraPodSpec"]["mainContainer"]["command"] == [
         "python3",
         "-m",
         "dynamo.kv_state_agent",
     ]
-    for index, name in enumerate(("VllmWorkerA", "VllmWorkerB")):
+    for index, name in enumerate(("VllmWorkerA", "VllmWorkerB", "VllmWorkerC")):
         service = services[name]
         assert service["replicas"] == 1
         worker = service["extraPodSpec"]
@@ -1116,7 +1116,7 @@ def test_templates_render_string_args_for_numeric_looking_values():
     }
     daemonset_text = (examples / "guard-daemonset.yaml").read_text()
     assert daemonset_text.count('memory: "${GAAS_SUPERVISOR_MEMORY}"') == 2
-    assert (examples / "dgd.yaml").read_text().count('"${GAAS_CLAIM_GB}"') == 12
+    assert (examples / "dgd.yaml").read_text().count('"${GAAS_CLAIM_GB}"') == 18
 
     def render(text):
         return re.sub(r"\$\{(GAAS_[A-Z_]+)\}", lambda m: variables[m[1]], text)

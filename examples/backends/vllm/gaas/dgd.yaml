@@ -401,6 +401,189 @@ spec:
             emptyDir:
               medium: Memory
               sizeLimit: 1Mi
+    VllmWorkerC:
+      componentType: worker
+      replicas: 1
+      # vLLM's CPU KV offload shared region (--cpu-bytes, GAAS_CPU_PRIMARY_BYTES) lives in the worker's /dev/shm; the operator sizes /dev/shm
+      # from this field, so keep it above that value. Memory limit must cover it (tmpfs pages charge this pod).
+      sharedMemory:
+        size: 64Gi
+      runtimeVersionOverride: "1.7.0"
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: "${GAAS_NODE}"
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Equal
+            value: "true"
+            effect: NoSchedule
+        imagePullSecrets:
+          - name: nvcrimagepullsecret
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          fsGroup: 1000
+          seccompProfile:
+            type: RuntimeDefault
+        initContainers:
+          - name: gaas-claim
+            image: ${GAAS_IMAGE}
+            command: [python3, -m, dynamo.gaas, init]
+            args:
+              - --claim-file
+              - /run/gaas/claim.json
+              - --pool-id
+              - h7-pool-a
+              - --size-gb
+              - "${GAAS_CLAIM_GB}"
+              - --compatibility-digest
+              - "${GAAS_COMPATIBILITY_DIGEST}"
+              - --tenant
+              - "${GAAS_NAME}"
+              - --lineage
+              - "${GAAS_NAME}"
+              - --minimum-gb
+              - "${GAAS_CLAIM_GB}"
+              - --maximum-gb
+              - "${GAAS_CLAIM_GB}"
+              - --state-agent-namespace
+              - "${GAAS_NAMESPACE}-${GAAS_NAME}"
+              - --guard-index
+              - "2"
+              - --service-socket
+              - ${GAAS_SOCKET_ROOT}/service.sock
+            env:
+              - name: NVIDIA_VISIBLE_DEVICES
+                value: void
+              - name: CUDA_VISIBLE_DEVICES
+                value: ""
+            resources:
+              requests:
+                cpu: 100m
+                memory: 2Gi
+              limits:
+                cpu: "1"
+                memory: 2Gi
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop: [ALL]
+            volumeMounts:
+              - name: socket-directory
+                mountPath: /node-shm
+              - name: claim
+                mountPath: /run/gaas
+        mainContainer:
+          name: main
+          image: ${GAAS_IMAGE}
+          terminationMessagePolicy: FallbackToLogsOnError
+          # Remove stale vLLM CPU offload region files: /dev/shm is a pod-local emptyDir and engine_id changes per container restart.
+          command: [/bin/sh, -c, 'rm -f /dev/shm/vllm_offload_*.mmap; exec "$@"', --, python3, -m, dynamo.gaas, launch]
+          args:
+            - --claim-file
+            - /run/gaas/claim.json
+            - --pool-id
+            - h7-pool-a
+            - --size-gb
+            - "${GAAS_CLAIM_GB}"
+            - --compatibility-digest
+            - "${GAAS_COMPATIBILITY_DIGEST}"
+            - --tenant
+            - "${GAAS_NAME}"
+            - --lineage
+            - "${GAAS_NAME}"
+            - --minimum-gb
+            - "${GAAS_CLAIM_GB}"
+            - --maximum-gb
+            - "${GAAS_CLAIM_GB}"
+            - --state-agent-namespace
+            - "${GAAS_NAMESPACE}-${GAAS_NAME}"
+            - --guard-index
+            - "2"
+            - --state-agent
+            - --service-socket
+            - ${GAAS_SOCKET_ROOT}/service.sock
+            - --cpu-bytes
+            - "${GAAS_CPU_PRIMARY_BYTES}"
+            - --
+            # Weights come from the shared model-cache PVC (no 28.75 GiB Hugging Face download per start).
+            - --model
+            - /model-cache/Qwen3.8-27B-FP8
+            - --served-model-name
+            - "${GAAS_MODEL}"
+            - --tensor-parallel-size
+            - "1"
+            - --pipeline-parallel-size
+            - "1"
+            - --data-parallel-size
+            - "1"
+            - --kv-cache-memory-bytes
+            - "${GAAS_GPU_KV_BYTES}"
+            - --max-model-len
+            - "${GAAS_MAX_MODEL_LEN}"
+            - --max-num-seqs
+            - "1"
+            - --enable-prefix-caching
+            - --kv-events-config
+            - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:23080","enable_kv_cache_events":true}'
+            - --kv-transfer-config
+            - '{"kv_connector_extra_config":{"secondary_tiers":[{"type":"kvcr","operation_timeout_ms":5000,"abandon_timeout_ms":10000}]}}'
+          env:
+            - name: GAAS_ADVERTISE_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            # The KVCR runtime emits its transfer events in the vLLM EngineCore child process, where Dynamo's log bridge is not installed; the KVCR library attaches its own handler when KVCR_LOG_LEVEL is set (KVCR >= the commit following 3371ca9), while DYN_LOG covers records emitted in the parent.
+            - name: KVCR_LOG_LEVEL
+              value: DEBUG
+            - name: DYN_LOG
+              value: info,remote_fw_dram=debug,remote_ops=debug
+            - name: HF_HOME
+              value: /tmp/huggingface
+            - name: TRITON_CACHE_DIR
+              value: /tmp/triton
+            - name: TORCHINDUCTOR_CACHE_DIR
+              value: /tmp/torchinductor
+          resources:
+            requests:
+              cpu: "4"
+              memory: 96Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "8"
+              memory: 96Gi
+              nvidia.com/gpu: "1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: socket-directory
+              mountPath: /node-shm
+            - name: claim
+              mountPath: /run/gaas
+              readOnly: true
+            - name: model-cache
+              mountPath: /model-cache
+              readOnly: true
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: shared-model-cache
+              readOnly: true
+          - name: socket-directory
+            hostPath:
+              path: /dev/shm
+              type: Directory
+          - name: claim
+            emptyDir:
+              medium: Memory
+              sizeLimit: 1Mi
     KvStateAgent:
       componentType: worker
       replicas: 1
