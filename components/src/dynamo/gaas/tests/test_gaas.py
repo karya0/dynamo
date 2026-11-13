@@ -641,6 +641,62 @@ def test_canonical_templates_match_yaml_and_three_worker_contract():
     assert {"name": "DYN_LOG", "value": "debug"} in agent_env
 
 
+def test_bundle_fixes_october_c112_values_on_every_worker():
+    # The yaml equals manifest-bundle.json (previous test), so this covers both.
+    examples = _repository_root() / "examples/backends/vllm/gaas"
+    services = yaml.safe_load((examples / "dgd.yaml").read_text())["spec"]["services"]
+    frontend = services["Frontend"]["extraPodSpec"]["mainContainer"]
+    command = frontend["command"]
+    assert command[:2] == ["/bin/sh", "-c"]
+    assert command[3:] == ["--", "python3", "-m", "dynamo.frontend"]
+    policy = command[2].split("<<'EOF'\n", 1)[1].split("\nEOF\n", 1)[0]
+    assert "cat > /tmp/agentic-router-policy.yaml <<'EOF'\n" in command[2]
+    assert command[2].endswith('exec "$@"\n')
+    assert yaml.safe_load(policy) == {
+        "worker_selection": {
+            "aggregated": "dynamo-two-tier-cost-fn",
+            "instances": [
+                {
+                    "name": "dynamo-two-tier-cost-fn",
+                    "type": "dynamo-two-tier-cost-fn",
+                    "parameters": {
+                        "cache_threshold": 0.5,
+                        "balance_abs_threshold": 10,
+                        "balance_rel_threshold": 1.1,
+                    },
+                }
+            ],
+        }
+    }
+    assert frontend["args"] == [
+        "--router-kv-overlap-score-credit",
+        "2",
+        "--router-prefill-load-scale",
+        "4",
+        "--router-decode-active-request-weight",
+        "64",
+        "--router-policy-config",
+        "/tmp/agentic-router-policy.yaml",
+    ]
+    assert {"name": "DYN_ROUTER_MODE", "value": "kv"} in frontend["env"]
+    for name in ("VllmWorkerA", "VllmWorkerB", "VllmWorkerC"):
+        # 50 GiB CPU tier: /dev/shm = region + 14 GiB, memory = /dev/shm + 32 GiB.
+        assert services[name]["sharedMemory"] == {"size": "64Gi"}, name
+        worker = services[name]["extraPodSpec"]
+        main = worker["mainContainer"]
+        for kind in ("requests", "limits"):
+            assert main["resources"][kind]["memory"] == "96Gi", (name, kind)
+        args = main["args"]
+        assert args[args.index("--cpu-bytes") + 1] == "${GAAS_CPU_PRIMARY_BYTES}"
+        for claim_args in (worker["initContainers"][0]["args"], args):
+            for flag in ("--size-gb", "--minimum-gb", "--maximum-gb"):
+                assert claim_args[claim_args.index(flag) + 1] == "${GAAS_CLAIM_GB}"
+        engine = args[args.index("--") + 1 :]
+        assert engine[engine.index("--max-num-batched-tokens") + 1] == "32768", name
+        assert "--enforce-eager" in engine, name
+        assert engine[engine.index("--max-num-seqs") + 1] == "224", name
+
+
 def test_rendered_dgd_matches_repository_crd_schema():
     root = _repository_root()
     source = (root / "examples/backends/vllm/gaas/manifest-bundle.json").read_text()

@@ -331,7 +331,7 @@
             "componentType": "worker",
             "replicas": 1,
             "sharedMemory": {
-              "size": "214Gi"
+              "size": "64Gi"
             },
             "runtimeVersionOverride": "1.7.0",
             "extraPodSpec": {
@@ -541,12 +541,12 @@
                 "resources": {
                   "requests": {
                     "cpu": "4",
-                    "memory": "246Gi",
+                    "memory": "96Gi",
                     "nvidia.com/gpu": "1"
                   },
                   "limits": {
                     "cpu": "8",
-                    "memory": "246Gi",
+                    "memory": "96Gi",
                     "nvidia.com/gpu": "1"
                   }
                 },
@@ -604,7 +604,7 @@
             "componentType": "worker",
             "replicas": 1,
             "sharedMemory": {
-              "size": "214Gi"
+              "size": "64Gi"
             },
             "runtimeVersionOverride": "1.7.0",
             "extraPodSpec": {
@@ -814,12 +814,12 @@
                 "resources": {
                   "requests": {
                     "cpu": "4",
-                    "memory": "246Gi",
+                    "memory": "96Gi",
                     "nvidia.com/gpu": "1"
                   },
                   "limits": {
                     "cpu": "8",
-                    "memory": "246Gi",
+                    "memory": "96Gi",
                     "nvidia.com/gpu": "1"
                   }
                 },
@@ -877,7 +877,7 @@
             "componentType": "worker",
             "replicas": 1,
             "sharedMemory": {
-              "size": "214Gi"
+              "size": "64Gi"
             },
             "runtimeVersionOverride": "1.7.0",
             "extraPodSpec": {
@@ -1087,12 +1087,12 @@
                 "resources": {
                   "requests": {
                     "cpu": "4",
-                    "memory": "246Gi",
+                    "memory": "96Gi",
                     "nvidia.com/gpu": "1"
                   },
                   "limits": {
                     "cpu": "8",
-                    "memory": "246Gi",
+                    "memory": "96Gi",
                     "nvidia.com/gpu": "1"
                   }
                 },
