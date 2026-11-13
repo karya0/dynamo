@@ -587,7 +587,11 @@ def test_canonical_templates_match_yaml_and_three_worker_contract():
         "name": "KVCR_ADVERTISE_HOST",
         "valueFrom": {"fieldRef": {"fieldPath": "status.hostIP"}},
     } in supervisor["env"]
-    assert supervisor["args"][supervisor["args"].index("--guard-count") + 1] == "3"
+    for flag in ("guard-count", "slot-cap-bytes", "pool-sizes-gb"):
+        assert not any(flag in arg for arg in supervisor["args"]), flag
+    assert supervisor["args"][supervisor["args"].index("--manager-id") + 1] == (
+        "${GAAS_NAME}"
+    )
     assert services["KvStateAgent"]["extraPodSpec"]["mainContainer"]["command"] == [
         "python3",
         "-m",
@@ -712,8 +716,6 @@ def test_rendered_dgd_matches_repository_crd_schema():
         "GAAS_CPU_PRIMARY_BYTES": "67108864",
         "GAAS_GPU_KV_BYTES": "268435456",
         "GAAS_MAX_MODEL_LEN": "8192",
-        "GAAS_POOL_SIZES_GB": "4",
-        "GAAS_SLOT_CAP_BYTES": "4294967296",
         "GAAS_SUPERVISOR_MEMORY": "4Gi",
         "GAAS_CLAIM_GB": "2",
     }
@@ -1170,8 +1172,6 @@ def test_templates_render_string_args_for_numeric_looking_values():
         "GAAS_CPU_PRIMARY_BYTES": "67108864",
         "GAAS_GPU_KV_BYTES": "268435456",
         "GAAS_MAX_MODEL_LEN": "8192",
-        "GAAS_POOL_SIZES_GB": "4",
-        "GAAS_SLOT_CAP_BYTES": "4294967296",
         "GAAS_SUPERVISOR_MEMORY": "4Gi",
         "GAAS_CLAIM_GB": "2",
     }
