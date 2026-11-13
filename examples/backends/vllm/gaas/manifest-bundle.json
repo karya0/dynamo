@@ -295,6 +295,25 @@
               "mainContainer": {
                 "name": "main",
                 "image": "${GAAS_IMAGE}",
+                "command": [
+                  "/bin/sh",
+                  "-c",
+                  "cat > /tmp/agentic-router-policy.yaml <<'EOF'\nworker_selection:\n  aggregated: dynamo-two-tier-cost-fn\n  instances:\n    - name: dynamo-two-tier-cost-fn\n      type: dynamo-two-tier-cost-fn\n      parameters:\n        cache_threshold: 0.5\n        balance_abs_threshold: 10\n        balance_rel_threshold: 1.1\nEOF\nexec \"$@\"\n",
+                  "--",
+                  "python3",
+                  "-m",
+                  "dynamo.frontend"
+                ],
+                "args": [
+                  "--router-kv-overlap-score-credit",
+                  "2",
+                  "--router-prefill-load-scale",
+                  "4",
+                  "--router-decode-active-request-weight",
+                  "64",
+                  "--router-policy-config",
+                  "/tmp/agentic-router-policy.yaml"
+                ],
                 "env": [
                   {
                     "name": "DYN_ROUTER_MODE",
@@ -312,7 +331,7 @@
             "componentType": "worker",
             "replicas": 1,
             "sharedMemory": {
-              "size": "64Gi"
+              "size": "214Gi"
             },
             "runtimeVersionOverride": "1.7.0",
             "extraPodSpec": {
@@ -472,6 +491,9 @@
                   "${GAAS_MAX_MODEL_LEN}",
                   "--max-num-seqs",
                   "224",
+                  "--max-num-batched-tokens",
+                  "32768",
+                  "--enforce-eager",
                   "--enable-prefix-caching",
                   "--kv-events-config",
                   "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:23080\",\"enable_kv_cache_events\":true}",
@@ -519,12 +541,12 @@
                 "resources": {
                   "requests": {
                     "cpu": "4",
-                    "memory": "96Gi",
+                    "memory": "246Gi",
                     "nvidia.com/gpu": "1"
                   },
                   "limits": {
                     "cpu": "8",
-                    "memory": "96Gi",
+                    "memory": "246Gi",
                     "nvidia.com/gpu": "1"
                   }
                 },
@@ -582,7 +604,7 @@
             "componentType": "worker",
             "replicas": 1,
             "sharedMemory": {
-              "size": "64Gi"
+              "size": "214Gi"
             },
             "runtimeVersionOverride": "1.7.0",
             "extraPodSpec": {
@@ -742,6 +764,9 @@
                   "${GAAS_MAX_MODEL_LEN}",
                   "--max-num-seqs",
                   "224",
+                  "--max-num-batched-tokens",
+                  "32768",
+                  "--enforce-eager",
                   "--enable-prefix-caching",
                   "--kv-events-config",
                   "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:23080\",\"enable_kv_cache_events\":true}",
@@ -789,12 +814,12 @@
                 "resources": {
                   "requests": {
                     "cpu": "4",
-                    "memory": "96Gi",
+                    "memory": "246Gi",
                     "nvidia.com/gpu": "1"
                   },
                   "limits": {
                     "cpu": "8",
-                    "memory": "96Gi",
+                    "memory": "246Gi",
                     "nvidia.com/gpu": "1"
                   }
                 },
@@ -852,7 +877,7 @@
             "componentType": "worker",
             "replicas": 1,
             "sharedMemory": {
-              "size": "64Gi"
+              "size": "214Gi"
             },
             "runtimeVersionOverride": "1.7.0",
             "extraPodSpec": {
@@ -1012,6 +1037,9 @@
                   "${GAAS_MAX_MODEL_LEN}",
                   "--max-num-seqs",
                   "224",
+                  "--max-num-batched-tokens",
+                  "32768",
+                  "--enforce-eager",
                   "--enable-prefix-caching",
                   "--kv-events-config",
                   "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:23080\",\"enable_kv_cache_events\":true}",
@@ -1059,12 +1087,12 @@
                 "resources": {
                   "requests": {
                     "cpu": "4",
-                    "memory": "96Gi",
+                    "memory": "246Gi",
                     "nvidia.com/gpu": "1"
                   },
                   "limits": {
                     "cpu": "8",
-                    "memory": "96Gi",
+                    "memory": "246Gi",
                     "nvidia.com/gpu": "1"
                   }
                 },

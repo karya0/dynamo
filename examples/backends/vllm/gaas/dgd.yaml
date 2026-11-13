@@ -30,6 +30,36 @@ spec:
         mainContainer:
           name: main
           image: ${GAAS_IMAGE}
+          # Router flags and two-tier policy of the 2026-10-12 C112 run (router-c112-kvcr-20261012, two-tier-agentic-guard-5).
+          command:
+            - /bin/sh
+            - -c
+            - |
+              cat > /tmp/agentic-router-policy.yaml <<'EOF'
+              worker_selection:
+                aggregated: dynamo-two-tier-cost-fn
+                instances:
+                  - name: dynamo-two-tier-cost-fn
+                    type: dynamo-two-tier-cost-fn
+                    parameters:
+                      cache_threshold: 0.5
+                      balance_abs_threshold: 10
+                      balance_rel_threshold: 1.1
+              EOF
+              exec "$@"
+            - --
+            - python3
+            - -m
+            - dynamo.frontend
+          args:
+            - --router-kv-overlap-score-credit
+            - "2"
+            - --router-prefill-load-scale
+            - "4"
+            - --router-decode-active-request-weight
+            - "64"
+            - --router-policy-config
+            - /tmp/agentic-router-policy.yaml
           env:
             - name: DYN_ROUTER_MODE
               value: kv
@@ -41,7 +71,7 @@ spec:
       # vLLM's CPU KV offload shared region (--cpu-bytes, GAAS_CPU_PRIMARY_BYTES) lives in the worker's /dev/shm; the operator sizes /dev/shm
       # from this field, so keep it above that value. Memory limit must cover it (tmpfs pages charge this pod).
       sharedMemory:
-        size: 64Gi
+        size: 214Gi
       runtimeVersionOverride: "1.7.0"
       extraPodSpec:
         nodeSelector:
@@ -158,6 +188,9 @@ spec:
             - "${GAAS_MAX_MODEL_LEN}"
             - --max-num-seqs
             - "224"
+            - --max-num-batched-tokens
+            - "32768"
+            - --enforce-eager
             - --enable-prefix-caching
             - --kv-events-config
             - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:23080","enable_kv_cache_events":true}'
@@ -186,11 +219,11 @@ spec:
           resources:
             requests:
               cpu: "4"
-              memory: 96Gi
+              memory: 246Gi
               nvidia.com/gpu: "1"
             limits:
               cpu: "8"
-              memory: 96Gi
+              memory: 246Gi
               nvidia.com/gpu: "1"
           securityContext:
             allowPrivilegeEscalation: false
@@ -224,7 +257,7 @@ spec:
       # vLLM's CPU KV offload shared region (--cpu-bytes, GAAS_CPU_PRIMARY_BYTES) lives in the worker's /dev/shm; the operator sizes /dev/shm
       # from this field, so keep it above that value. Memory limit must cover it (tmpfs pages charge this pod).
       sharedMemory:
-        size: 64Gi
+        size: 214Gi
       runtimeVersionOverride: "1.7.0"
       extraPodSpec:
         nodeSelector:
@@ -341,6 +374,9 @@ spec:
             - "${GAAS_MAX_MODEL_LEN}"
             - --max-num-seqs
             - "224"
+            - --max-num-batched-tokens
+            - "32768"
+            - --enforce-eager
             - --enable-prefix-caching
             - --kv-events-config
             - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:23080","enable_kv_cache_events":true}'
@@ -369,11 +405,11 @@ spec:
           resources:
             requests:
               cpu: "4"
-              memory: 96Gi
+              memory: 246Gi
               nvidia.com/gpu: "1"
             limits:
               cpu: "8"
-              memory: 96Gi
+              memory: 246Gi
               nvidia.com/gpu: "1"
           securityContext:
             allowPrivilegeEscalation: false
@@ -407,7 +443,7 @@ spec:
       # vLLM's CPU KV offload shared region (--cpu-bytes, GAAS_CPU_PRIMARY_BYTES) lives in the worker's /dev/shm; the operator sizes /dev/shm
       # from this field, so keep it above that value. Memory limit must cover it (tmpfs pages charge this pod).
       sharedMemory:
-        size: 64Gi
+        size: 214Gi
       runtimeVersionOverride: "1.7.0"
       extraPodSpec:
         nodeSelector:
@@ -524,6 +560,9 @@ spec:
             - "${GAAS_MAX_MODEL_LEN}"
             - --max-num-seqs
             - "224"
+            - --max-num-batched-tokens
+            - "32768"
+            - --enforce-eager
             - --enable-prefix-caching
             - --kv-events-config
             - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:23080","enable_kv_cache_events":true}'
@@ -552,11 +591,11 @@ spec:
           resources:
             requests:
               cpu: "4"
-              memory: 96Gi
+              memory: 246Gi
               nvidia.com/gpu: "1"
             limits:
               cpu: "8"
-              memory: 96Gi
+              memory: 246Gi
               nvidia.com/gpu: "1"
           securityContext:
             allowPrivilegeEscalation: false
