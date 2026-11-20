@@ -37,7 +37,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::discovery::kv_state_agent::{
     KV_STATE_ATTACHMENT_INTENT_TOPIC_V2, KV_STATE_HOST_TOPIC_V2, KvStateAttachmentIntent,
-    KvStateHostAdvertisement, KvStateIngressProtocol,
+    KvStateHostAdvertisement, KvStateIngressProtocol, NODE_NAME_ENV,
 };
 
 const HOST_COMPONENT: &str = "kv_state_agent";
@@ -193,9 +193,13 @@ async fn discover_single_host(
     let namespace = component.namespace().name();
     let discovery = component.drt().discovery();
     let shutdown = component.drt().primary_token();
+    let node = std::env::var(NODE_NAME_ENV)
+        .ok()
+        .filter(|node| !node.is_empty());
     await_single_host(
         discovery.as_ref(),
         &namespace,
+        node.as_deref(),
         host_discovery_timeout(|key| std::env::var_os(key)),
         &shutdown,
     )
@@ -223,6 +227,8 @@ fn host_discovery_timeout(mut get_env: impl FnMut(&str) -> Option<OsString>) -> 
 
 /// Wait up to `timeout` for exactly one live V2 state-agent host.
 ///
+/// A worker that knows its `node` considers only hosts advertising that node;
+/// without a node every host counts, as before.
 /// The `list` snapshot stays authoritative: two or more hosts fail closed
 /// immediately (misconfiguration, not a race), and the watch stream is only a
 /// wake-up to re-list while no host is advertised yet — a watch event is
@@ -232,6 +238,7 @@ fn host_discovery_timeout(mut get_env: impl FnMut(&str) -> Option<OsString>) -> 
 async fn await_single_host(
     discovery: &dyn Discovery,
     namespace: &str,
+    node: Option<&str>,
     timeout: Duration,
     shutdown: &CancellationToken,
 ) -> Result<KvStateHostAdvertisement> {
@@ -242,7 +249,7 @@ async fn await_single_host(
     // restarts. TODO(#13044): watch and reselect the host after startup when
     // rolling host replacement and Kubernetes lifecycle are supported.
     if timeout.is_zero() {
-        return match list_single_host(discovery, namespace).await? {
+        return match list_single_host(discovery, namespace, node).await? {
             Some(host) => Ok(host),
             None => Err(exactly_one_host_error(0)),
         };
@@ -255,7 +262,7 @@ async fn await_single_host(
     // outlives the wait for the rest of the process.
     let _watch_guard = watch_cancel.clone().drop_guard();
     let wait = async {
-        if let Some(host) = list_single_host(discovery, namespace).await? {
+        if let Some(host) = list_single_host(discovery, namespace, node).await? {
             return Ok(host);
         }
         tracing::info!(
@@ -269,7 +276,7 @@ async fn await_single_host(
             .context("failed to watch for the KV state-agent host")?;
         while let Some(event) = events.next().await {
             event.context("KV state-agent host discovery watch failed")?;
-            if let Some(host) = list_single_host(discovery, namespace).await? {
+            if let Some(host) = list_single_host(discovery, namespace, node).await? {
                 return Ok(host);
             }
         }
@@ -315,9 +322,11 @@ fn host_query(namespace: &str) -> DiscoveryQuery {
 }
 
 /// One authoritative snapshot: `None` while no host is advertised, an error on more than one.
+/// With `node` set, only hosts advertising that node are counted.
 async fn list_single_host(
     discovery: &dyn Discovery,
     namespace: &str,
+    node: Option<&str>,
 ) -> Result<Option<KvStateHostAdvertisement>> {
     let instances = discovery
         .list(host_query(namespace))
@@ -346,6 +355,10 @@ async fn list_single_host(
         {
             hosts.push(host);
         }
+    }
+    if let Some(node) = node {
+        // Two hosts on this node still fail closed below.
+        hosts.retain(|host| host.node.as_deref() == Some(node));
     }
     if hosts.len() > 1 {
         return Err(exactly_one_host_error(hosts.len()));
@@ -618,6 +631,19 @@ mod tests {
             host_instance: host.clone(),
             control_target: host,
             max_slots: 8,
+            node: None,
+        }
+    }
+
+    /// A V2 host advertisement with its own instance id and node.
+    fn host_on(instance_id: u64, node: Option<&str>) -> KvStateHostAdvertisement {
+        let host = instance("kv_state_agent", instance_id);
+        KvStateHostAdvertisement {
+            protocol_version: KvStateProtocolVersion::V2,
+            host_instance: host.clone(),
+            control_target: host,
+            max_slots: 8,
+            node: node.map(str::to_string),
         }
     }
 
@@ -766,6 +792,7 @@ mod tests {
         let found = await_single_host(
             discovery.as_ref(),
             "ns",
+            None,
             Duration::ZERO,
             &CancellationToken::new(),
         )
@@ -790,6 +817,7 @@ mod tests {
             await_single_host(
                 discovery.as_ref(),
                 "ns",
+                None,
                 Duration::from_secs(30),
                 &CancellationToken::new(),
             ),
@@ -820,7 +848,13 @@ mod tests {
         let started = tokio::time::Instant::now();
         let error = tokio::time::timeout(
             Duration::from_secs(10),
-            await_single_host(discovery.as_ref(), "ns", Duration::from_secs(30), &shutdown),
+            await_single_host(
+                discovery.as_ref(),
+                "ns",
+                None,
+                Duration::from_secs(30),
+                &shutdown,
+            ),
         )
         .await
         .expect("cancellation must resolve the wait")
@@ -835,6 +869,7 @@ mod tests {
         let error = await_single_host(
             discovery.as_ref(),
             "ns",
+            None,
             Duration::from_millis(200),
             &CancellationToken::new(),
         )
@@ -854,6 +889,7 @@ mod tests {
         let error = await_single_host(
             discovery.as_ref(),
             "ns",
+            None,
             Duration::ZERO,
             &CancellationToken::new(),
         )
@@ -873,6 +909,7 @@ mod tests {
             host_instance: second_instance.clone(),
             control_target: second_instance,
             max_slots: 8,
+            node: None,
         };
         // Distinct publisher ids: a same-id re-register resolves to the
         // existing instance and would silently collapse this into one host.
@@ -881,6 +918,66 @@ mod tests {
         let error = await_single_host(
             discovery.as_ref(),
             "ns",
+            None,
+            Duration::from_secs(30),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(format!("{error:#}").contains("exactly one live V2 host, found 2"));
+    }
+    /// Multi-DGD step 6: one host per node, the worker keeps its node's host.
+    #[tokio::test]
+    async fn worker_node_selects_the_host_on_that_node() {
+        let discovery = mock_discovery();
+        register_host(discovery.as_ref(), 41, &host_on(1, Some("node-a"))).await;
+        register_host(discovery.as_ref(), 42, &host_on(2, Some("node-b"))).await;
+        let found = await_single_host(
+            discovery.as_ref(),
+            "ns",
+            Some("node-b"),
+            Duration::from_secs(30),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(found.host_instance, host_on(2, None).host_instance);
+        assert_eq!(found.node.as_deref(), Some("node-b"));
+    }
+
+    /// A worker without a node keeps today's rule even when hosts name nodes.
+    #[tokio::test]
+    async fn worker_without_a_node_still_fails_closed_on_two_hosts() {
+        let discovery = mock_discovery();
+        register_host(discovery.as_ref(), 41, &host_on(1, Some("node-a"))).await;
+        register_host(discovery.as_ref(), 42, &host_on(2, Some("node-b"))).await;
+        let started = tokio::time::Instant::now();
+        let error = await_single_host(
+            discovery.as_ref(),
+            "ns",
+            None,
+            Duration::from_secs(30),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(format!("{error:#}").contains("exactly one live V2 host, found 2"));
+    }
+
+    /// Two hosts on the worker's own node are still ambiguous.
+    #[tokio::test]
+    async fn two_hosts_on_the_worker_node_fail_closed() {
+        let discovery = mock_discovery();
+        register_host(discovery.as_ref(), 41, &host_on(1, Some("node-a"))).await;
+        register_host(discovery.as_ref(), 42, &host_on(2, Some("node-a"))).await;
+        register_host(discovery.as_ref(), 43, &host_on(3, Some("node-b"))).await;
+        let started = tokio::time::Instant::now();
+        let error = await_single_host(
+            discovery.as_ref(),
+            "ns",
+            Some("node-a"),
             Duration::from_secs(30),
             &CancellationToken::new(),
         )

@@ -33,7 +33,7 @@ use crate::direct_zmq_sub_pool::{DirectZmqSubPool, KV_ZMQ_RCVHWM};
 use crate::discovery::kv_state_agent::{
     KV_STATE_ATTACHMENT_INTENT_TOPIC_V2, KV_STATE_EVENT_TOPIC_V2, KV_STATE_HOST_TOPIC_V2,
     KvStateAttachmentIntent, KvStateHostAdvertisement, KvStateHostControlRequest,
-    KvStateHostStatus, KvStateIngressProtocol,
+    KvStateHostStatus, KvStateIngressProtocol, NODE_NAME_ENV,
 };
 
 use super::state_agent::{
@@ -265,6 +265,10 @@ impl KvStateAgentHost {
             host_instance: control_target.clone(),
             control_target: control_target.clone(),
             max_slots: config.max_slots,
+            // Lets a worker on the same node pick this host among several.
+            node: std::env::var(NODE_NAME_ENV)
+                .ok()
+                .filter(|node| !node.is_empty()),
         };
         let host_advertisement = match component
             .drt()
@@ -1296,11 +1300,12 @@ mod tests {
     // a detached owner holding a two-block prefix; host B then attaches the
     // moved worker W'. The tests assert today's readouts, not the design target.
     //
-    // Not re-tested: a worker that lists both hosts fails its host selection
-    // with "exactly one live V2 host, found 2", already asserted by
-    // `attachment_owner.rs` `two_advertised_hosts_fail_closed_before_the_deadline`.
-    // today: W' on B cannot select its host (DESIGN step 6). These tests call
-    // each host's `reconcile_owner` directly, below that selection.
+    // Not re-tested: host selection. A worker without NODE_NAME that lists both
+    // hosts fails with "exactly one live V2 host, found 2"
+    // (`attachment_owner.rs` `two_advertised_hosts_fail_closed_before_the_deadline`);
+    // with NODE_NAME it keeps its node's host (DESIGN step 6,
+    // `worker_node_selects_the_host_on_that_node`). These tests call each host's
+    // `reconcile_owner` directly, below that selection.
     #[tokio::test]
     async fn two_agent_hosts_under_one_endpoint_distinct_owners() {
         two_agent_hosts_under_one_endpoint("multi-dgd-two-hosts-distinct", false).await;
@@ -1355,14 +1360,23 @@ mod tests {
             endpoint
         };
 
-        let owner_a = owner(4);
-        // today: the owner id is a constant plus the guard index, so W' on B
-        // carries A's owner id (DESIGN step 7). The distinct case models step 7's
-        // proposal: the same slot under another cluster id.
-        let owner_b = if same_owner {
-            owner_a
+        // Same owner, the permanent "before": the owner id was a constant plus the
+        // guard index, so W' on B carried A's owner id (DESIGN step 7).
+        // Distinct owners: the slot parts the launcher (`gaas/__init__.py`
+        // `owner_slot`) now gives W on node A and W' on node B, the first 128 bits
+        // of sha256(json.dumps([node, "t1", "dgd-a", 0], separators=(",", ":")))
+        // for node "node-a" and "node-b" (pinned in test_gaas.py
+        // `test_v2_state_agent_owner_id_is_node_scoped`). The pool is the same
+        // for both, as the launcher keeps its pool prefix.
+        let (owner_a, owner_b) = if same_owner {
+            (owner(4), owner(4))
         } else {
-            owner_in_cluster(5, 4)
+            let pool = owner(4).pool();
+            let slot = |hex: &str| CacheOwnerId::new(pool, hex.parse().unwrap());
+            (
+                slot("d60c9e83286ca4643a4e24a0410decdf"),
+                slot("3b75aa058aa90fa46b3eb02153c4ba6d"),
+            )
         };
 
         // Host A: W attaches, publishes a two-block prefix, then leaves.

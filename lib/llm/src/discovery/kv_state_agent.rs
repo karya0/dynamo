@@ -74,12 +74,18 @@ impl KvStateIngressProtocol {
     }
 }
 
+/// Env var naming the Kubernetes node of a state-agent host or a worker.
+pub const NODE_NAME_ENV: &str = "NODE_NAME";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KvStateHostAdvertisement {
     pub protocol_version: KvStateProtocolVersion,
     pub host_instance: Instance,
     pub control_target: Instance,
     pub max_slots: usize,
+    /// Kubernetes node of the host ([`NODE_NAME_ENV`]); absent in older payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
 }
 
 /// Lease-owned request to attach one producer-owned raw stream to a host slot.

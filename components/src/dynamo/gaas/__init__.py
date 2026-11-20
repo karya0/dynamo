@@ -4,6 +4,7 @@
 """Init-container gate and launcher for two single-GPU workers' KVCR pool claims."""
 
 import argparse
+import hashlib
 import ipaddress
 import json
 import os
@@ -299,6 +300,13 @@ def _extract_transfer_config(argv: Sequence[str]) -> tuple[list[str], Claim]:
     return remaining, config
 
 
+def owner_slot(node: str, tenant: str, lineage: str, guard_index: int) -> str:
+    """The CacheOwnerId slot part: the first 128 bits of sha256 over
+    (node, tenant, lineage, guard_index), JSON-encoded so fields cannot run together."""
+    key = json.dumps([node, tenant, lineage, guard_index], separators=(",", ":"))
+    return hashlib.sha256(key.encode()).hexdigest()[:32]
+
+
 def launch_argv(
     descriptor: Claim,
     cpu_bytes: int,
@@ -307,6 +315,7 @@ def launch_argv(
     advertise_host: str | None = None,
     state_agent: bool = False,
     raw_advertise_host: str | None = None,
+    node: str | None = None,
 ) -> list[str]:
     if isinstance(cpu_bytes, bool) or cpu_bytes <= 0:
         raise ValueError("cpu_bytes must be positive")
@@ -387,12 +396,22 @@ def launch_argv(
     extra["cpu_bytes_to_use"] = cpu_bytes
     extra["self_describing_kv_events"] = True
     if state_agent:
-        slot = descriptor["guard_index"]
+        # The slot part is node-scoped so a successor on another node does not
+        # reuse the owner a detached slot keeps; the pool prefix is unchanged.
+        # The cluster id stays constant: it must not be derived per endpoint
+        # (lib/kv-router/src/identity.rs ClusterId).
+        gaas = descriptor.get("gaas", {})
+        slot = owner_slot(
+            node or "",
+            gaas.get("tenant", ""),
+            gaas.get("lineage", ""),
+            descriptor["guard_index"],
+        )
         extra["dynamo_state_agent"] = {
             "raw_advertise_host": raw_advertise_host,
             "cache_owner_ids": {
                 "0": "01010101010101010101010101010101:"
-                f"02020202020202020202020202020202/0303030303030303/{slot:032x}"
+                f"02020202020202020202020202020202/0303030303030303/{slot}"
             },
         }
     config["kv_connector"] = "OffloadingConnector"
@@ -456,6 +475,7 @@ def main(argv: Sequence[str] | None = None, *, ensure_pool: EnsurePool) -> int:
         else:
             command_parser.add_argument("--cpu-bytes", type=int, required=True)
             command_parser.add_argument("--state-agent", action="store_true")
+            command_parser.add_argument("--node", default=os.environ.get("NODE_NAME"))
             command_parser.add_argument("backend_args", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     expected = claim_spec(
@@ -523,6 +543,7 @@ def main(argv: Sequence[str] | None = None, *, ensure_pool: EnsurePool) -> int:
         advertise_host=args.advertise_host,
         state_agent=args.state_agent,
         raw_advertise_host=args.raw_advertise_host,
+        node=args.node,
     )
     if args.state_agent:
         # The supervisor's state agent advertises in the base namespace; the

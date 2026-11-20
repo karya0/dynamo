@@ -27,6 +27,7 @@ from dynamo.gaas import (
     claim_spec,
     launch_argv,
     main,
+    owner_slot,
     prepare_claim,
     validate_descriptor,
     validate_gaas_descriptor,
@@ -846,9 +847,16 @@ def test_v1_still_requires_the_broker_socket(tmp_path):
         )
 
 
+_OWNER_PREFIX = (
+    "01010101010101010101010101010101:"
+    "02020202020202020202020202020202/0303030303030303/"
+)
+
+
 def test_v2_launch_passes_gaas_settings_without_a_holder_address(
     tmp_path, service_socket, v2_claim, monkeypatch
 ):
+    monkeypatch.setenv("NODE_NAME", "node-a")
     descriptor = {**v2_claim, "state": "ready", "control_port": 55001, "guard_index": 0}
     claim_file = tmp_path / "claim.json"
     claim_file.write_text(json.dumps(descriptor))
@@ -885,7 +893,47 @@ def test_v2_launch_passes_gaas_settings_without_a_holder_address(
     assert tier["guard_index_base"] == 0
     assert extra["dynamo_state_agent"]["raw_advertise_host"] == "10.9.9.9"
     assert tier["enable_telemetry"] is True
-    assert extra["dynamo_state_agent"]["cache_owner_ids"]["0"].endswith("/" + "0" * 32)
+    owner = extra["dynamo_state_agent"]["cache_owner_ids"]["0"]
+    assert owner == _OWNER_PREFIX + "d60c9e83286ca4643a4e24a0410decdf"
+
+
+def _state_agent_owner(descriptor, node):
+    args = launch_argv(
+        descriptor,
+        4096,
+        ["--model", "m"],
+        advertise_host="10.0.0.1",
+        state_agent=True,
+        raw_advertise_host="10.9.9.9",
+        node=node,
+    )
+    extra = json.loads(args[-1])["kv_connector_extra_config"]
+    return extra["dynamo_state_agent"]["cache_owner_ids"]["0"]
+
+
+def test_v2_state_agent_owner_id_is_node_scoped(v2_claim):
+    descriptor = {**v2_claim, "state": "ready", "control_port": 55001, "guard_index": 0}
+    on_a = _state_agent_owner(descriptor, "node-a")
+    on_b = _state_agent_owner(descriptor, "node-b")
+    # Pool prefix unchanged; only the 128-bit slot part varies.
+    for owner in (on_a, on_b):
+        assert owner.startswith(_OWNER_PREFIX)
+        assert re.fullmatch(r"[0-9a-f]{32}", owner.removeprefix(_OWNER_PREFIX))
+    assert on_a != on_b
+    # Stable for the same (node, tenant, lineage, guard_index).
+    assert _state_agent_owner(dict(descriptor), "node-a") == on_a
+    # The other inputs still separate owners on one node.
+    other_lineage = {**descriptor, "gaas": {**descriptor["gaas"], "lineage": "dgd-b"}}
+    other_index = {**descriptor, "guard_index": 1}
+    assert _state_agent_owner(other_lineage, "node-a") != on_a
+    assert _state_agent_owner(other_index, "node-a") != on_a
+    # Literals shared with state_agent_host.rs
+    # `two_agent_hosts_under_one_endpoint_distinct_owners`.
+    assert on_a == _OWNER_PREFIX + "d60c9e83286ca4643a4e24a0410decdf"
+    assert on_b == _OWNER_PREFIX + "3b75aa058aa90fa46b3eb02153c4ba6d"
+    assert owner_slot("node-a", "t1", "dgd-a", 0) == "d60c9e83286ca4643a4e24a0410decdf"
+    expected = hashlib.sha256(b'["node-b","t1","dgd-a",0]').hexdigest()[:32]
+    assert owner_slot("node-b", "t1", "dgd-a", 0) == expected
 
 
 def test_v2_state_agent_launch_drops_worker_namespace_suffix(
