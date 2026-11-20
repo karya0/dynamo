@@ -967,6 +967,8 @@ def test_launch_node_flag_is_the_node_the_worker_sees(
             "4096",
             "--advertise-host",
             "10.0.0.1",
+            "--raw-advertise-host",
+            "10.9.9.9",
             "--state-agent",
             "--node",
             "flag-node",

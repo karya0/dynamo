@@ -262,13 +262,14 @@ async fn await_single_host(
     // Cancelled on every exit path; without this the discovery watch task
     // outlives the wait for the rest of the process.
     let _watch_guard = watch_cancel.clone().drop_guard();
+    let node_label = node.map_or_else(|| "unset".to_string(), |n| format!("{n:?}"));
     let wait = async {
         if let Some(host) = list_single_host(discovery, namespace, node, &dropped_by_node).await? {
             return Ok(host);
         }
         tracing::info!(
             namespace,
-            worker_node = node,
+            worker_node = %node_label,
             hosts_on_other_nodes = dropped_by_node.load(Ordering::Relaxed),
             timeout_secs = timeout.as_secs(),
             "KV state-agent host is not advertised yet; waiting"
@@ -297,7 +298,7 @@ async fn await_single_host(
             Err(_elapsed) => anyhow::bail!(
                 "no live V2 KV state-agent host appeared within {}s \
                  (topic {KV_STATE_HOST_TOPIC_V2} on {namespace}/{HOST_COMPONENT}; \
-                 worker node {node:?}, {} advertised host(s) dropped for another node; \
+                 worker node {node_label}, {} advertised host(s) dropped for another node; \
                  set {HOST_DISCOVERY_TIMEOUT_ENV} to adjust the startup wait)",
                 timeout.as_secs(),
                 dropped_by_node.load(Ordering::Relaxed)
