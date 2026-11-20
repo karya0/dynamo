@@ -936,6 +936,52 @@ def test_v2_state_agent_owner_id_is_node_scoped(v2_claim):
     assert owner_slot("node-b", "t1", "dgd-a", 0) == expected
 
 
+def test_owner_slot_without_a_node_is_the_pre_node_scoping_id(v2_claim):
+    # Before ba3990e2 the slot was f"{guard_index:032x}" (the guard index as 32
+    # hex digits); with no node the owner id must stay exactly that.
+    assert owner_slot("", "t1", "dgd-a", 0) == "0" * 32
+    assert owner_slot("", "t1", "dgd-a", 5) == "0" * 31 + "5"
+    assert owner_slot("", "t1", "dgd-a", 255) == "0" * 30 + "ff"
+    descriptor = {**v2_claim, "state": "ready", "control_port": 55001, "guard_index": 5}
+    assert _state_agent_owner(descriptor, None) == _OWNER_PREFIX + "0" * 31 + "5"
+    assert _state_agent_owner(descriptor, "") == _OWNER_PREFIX + "0" * 31 + "5"
+    # With a node it is the node-scoped hash.
+    assert owner_slot("node-a", "t1", "dgd-a", 0) == "d60c9e83286ca4643a4e24a0410decdf"
+
+
+def test_launch_node_flag_is_the_node_the_worker_sees(
+    tmp_path, service_socket, v2_claim, monkeypatch
+):
+    monkeypatch.setenv("NODE_NAME", "env-node")
+    descriptor = {**v2_claim, "state": "ready", "control_port": 55001, "guard_index": 0}
+    claim_file = tmp_path / "claim.json"
+    claim_file.write_text(json.dumps(descriptor))
+    calls = []
+    monkeypatch.setattr(os, "execv", lambda exe, args: calls.append(args))
+    main(
+        _v2_args(
+            "launch",
+            claim_file,
+            service_socket,
+            "--cpu-bytes",
+            "4096",
+            "--advertise-host",
+            "10.0.0.1",
+            "--state-agent",
+            "--node",
+            "flag-node",
+            "--",
+            "--model",
+            "m",
+        ),
+        ensure_pool=lambda *a, **k: pytest.fail("unexpected broker call"),
+    )
+    assert os.environ["NODE_NAME"] == "flag-node"
+    extra = json.loads(calls[0][-1])["kv_connector_extra_config"]
+    owner = extra["dynamo_state_agent"]["cache_owner_ids"]["0"]
+    assert owner == _OWNER_PREFIX + owner_slot("flag-node", "t1", "dgd-a", 0)
+
+
 def test_v2_state_agent_launch_drops_worker_namespace_suffix(
     tmp_path, service_socket, v2_claim, monkeypatch
 ):

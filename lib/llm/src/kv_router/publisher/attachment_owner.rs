@@ -8,7 +8,7 @@ use std::{
     ffi::OsString,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -248,8 +248,9 @@ async fn await_single_host(
     // advertisement would otherwise serve without KV routing until it
     // restarts. TODO(#13044): watch and reselect the host after startup when
     // rolling host replacement and Kubernetes lifecycle are supported.
+    let dropped_by_node = AtomicUsize::new(0);
     if timeout.is_zero() {
-        return match list_single_host(discovery, namespace, node).await? {
+        return match list_single_host(discovery, namespace, node, &dropped_by_node).await? {
             Some(host) => Ok(host),
             None => Err(exactly_one_host_error(0)),
         };
@@ -262,11 +263,13 @@ async fn await_single_host(
     // outlives the wait for the rest of the process.
     let _watch_guard = watch_cancel.clone().drop_guard();
     let wait = async {
-        if let Some(host) = list_single_host(discovery, namespace, node).await? {
+        if let Some(host) = list_single_host(discovery, namespace, node, &dropped_by_node).await? {
             return Ok(host);
         }
         tracing::info!(
             namespace,
+            worker_node = node,
+            hosts_on_other_nodes = dropped_by_node.load(Ordering::Relaxed),
             timeout_secs = timeout.as_secs(),
             "KV state-agent host is not advertised yet; waiting"
         );
@@ -276,7 +279,9 @@ async fn await_single_host(
             .context("failed to watch for the KV state-agent host")?;
         while let Some(event) = events.next().await {
             event.context("KV state-agent host discovery watch failed")?;
-            if let Some(host) = list_single_host(discovery, namespace, node).await? {
+            if let Some(host) =
+                list_single_host(discovery, namespace, node, &dropped_by_node).await?
+            {
                 return Ok(host);
             }
         }
@@ -292,8 +297,10 @@ async fn await_single_host(
             Err(_elapsed) => anyhow::bail!(
                 "no live V2 KV state-agent host appeared within {}s \
                  (topic {KV_STATE_HOST_TOPIC_V2} on {namespace}/{HOST_COMPONENT}; \
+                 worker node {node:?}, {} advertised host(s) dropped for another node; \
                  set {HOST_DISCOVERY_TIMEOUT_ENV} to adjust the startup wait)",
-                timeout.as_secs()
+                timeout.as_secs(),
+                dropped_by_node.load(Ordering::Relaxed)
             ),
         },
     }
@@ -327,6 +334,7 @@ async fn list_single_host(
     discovery: &dyn Discovery,
     namespace: &str,
     node: Option<&str>,
+    dropped_by_node: &AtomicUsize,
 ) -> Result<Option<KvStateHostAdvertisement>> {
     let instances = discovery
         .list(host_query(namespace))
@@ -358,7 +366,11 @@ async fn list_single_host(
     }
     if let Some(node) = node {
         // Two hosts on this node still fail closed below.
+        let advertised = hosts.len();
         hosts.retain(|host| host.node.as_deref() == Some(node));
+        // Kept for the wait and timeout messages: a host advertised on another
+        // node (or with no node) is not "no host".
+        dropped_by_node.store(advertised - hosts.len(), Ordering::Relaxed);
     }
     if hosts.len() > 1 {
         return Err(exactly_one_host_error(hosts.len()));
@@ -624,17 +636,6 @@ mod tests {
         )
     }
 
-    fn host() -> KvStateHostAdvertisement {
-        let host = instance("kv_state_agent", 1);
-        KvStateHostAdvertisement {
-            protocol_version: KvStateProtocolVersion::V2,
-            host_instance: host.clone(),
-            control_target: host,
-            max_slots: 8,
-            node: None,
-        }
-    }
-
     /// A V2 host advertisement with its own instance id and node.
     fn host_on(instance_id: u64, node: Option<&str>) -> KvStateHostAdvertisement {
         let host = instance("kv_state_agent", instance_id);
@@ -680,7 +681,7 @@ mod tests {
     #[test]
     fn generic_owner_preserves_producer_worker_rank_and_resolved_uri() {
         let producer = instance("sglang_node_b", 11);
-        let intents = materialize_intents(&host(), &producer, 17, descriptors()).unwrap();
+        let intents = materialize_intents(&host_on(1, None), &producer, 17, descriptors()).unwrap();
         let selected = &intents[&7];
         assert_eq!(selected.producer_instance, producer);
         assert_eq!(selected.worker, WorkerWithDpRank::new(17, 7));
@@ -694,15 +695,19 @@ mod tests {
     async fn kth_registration_failure_rolls_back_every_intent() {
         let discovery = ControlledDiscovery::new(Some(2), None);
         let registrations = Arc::new(Mutex::new(Vec::new()));
-        let mut intents =
-            materialize_intents(&host(), &instance("producer", 11), 17, descriptors())
-                .unwrap()
-                .into_values()
-                .collect::<Vec<_>>();
+        let mut intents = materialize_intents(
+            &host_on(1, None),
+            &instance("producer", 11),
+            17,
+            descriptors(),
+        )
+        .unwrap()
+        .into_values()
+        .collect::<Vec<_>>();
         assert!(
             register_all(
                 discovery.clone(),
-                &host(),
+                &host_on(1, None),
                 &mut intents,
                 registrations.clone(),
                 CancellationToken::new(),
@@ -718,14 +723,19 @@ mod tests {
     async fn cancelled_registration_transaction_rolls_back_every_intent() {
         let discovery = ControlledDiscovery::new(None, Some(2));
         let registrations = Arc::new(Mutex::new(Vec::new()));
-        let intents = materialize_intents(&host(), &instance("producer", 11), 17, descriptors())
-            .unwrap()
-            .into_values()
-            .collect();
+        let intents = materialize_intents(
+            &host_on(1, None),
+            &instance("producer", 11),
+            17,
+            descriptors(),
+        )
+        .unwrap()
+        .into_values()
+        .collect();
         let (finished, result) = oneshot::channel();
         let task = tokio::spawn(run_registration_transaction(
             discovery.clone(),
-            host(),
+            host_on(1, None),
             intents,
             registrations.clone(),
             CancellationToken::new(),
@@ -788,7 +798,7 @@ mod tests {
     #[tokio::test]
     async fn advertised_host_is_returned_without_waiting() {
         let discovery = mock_discovery();
-        register_host(discovery.as_ref(), 41, &host()).await;
+        register_host(discovery.as_ref(), 41, &host_on(1, None)).await;
         let found = await_single_host(
             discovery.as_ref(),
             "ns",
@@ -798,7 +808,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(found.host_instance, host().host_instance);
+        assert_eq!(found.host_instance, host_on(1, None).host_instance);
     }
 
     /// A late advertisement must wake the watch and be found by the re-list.
@@ -808,7 +818,7 @@ mod tests {
         let register = discovery.clone();
         let registration = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            register_host(register.as_ref(), 41, &host()).await;
+            register_host(register.as_ref(), 41, &host_on(1, None)).await;
         });
         // The outer timeout bounds the test if registration fails or the
         // watch never wakes.
@@ -826,7 +836,7 @@ mod tests {
         .expect("discovery must resolve well before the outer deadline")
         .unwrap();
         registration.await.unwrap();
-        assert_eq!(found.host_instance, host().host_instance);
+        assert_eq!(found.host_instance, host_on(1, None).host_instance);
     }
 
     #[tokio::test]
@@ -902,15 +912,8 @@ mod tests {
     #[tokio::test]
     async fn two_advertised_hosts_fail_closed_before_the_deadline() {
         let discovery = mock_discovery();
-        register_host(discovery.as_ref(), 41, &host()).await;
-        let second_instance = instance("kv_state_agent", 2);
-        let second = KvStateHostAdvertisement {
-            protocol_version: KvStateProtocolVersion::V2,
-            host_instance: second_instance.clone(),
-            control_target: second_instance,
-            max_slots: 8,
-            node: None,
-        };
+        register_host(discovery.as_ref(), 41, &host_on(1, None)).await;
+        let second = host_on(2, None);
         // Distinct publisher ids: a same-id re-register resolves to the
         // existing instance and would silently collapse this into one host.
         register_host(discovery.as_ref(), 42, &second).await;
@@ -927,6 +930,29 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(format!("{error:#}").contains("exactly one live V2 host, found 2"));
     }
+    /// A host on another node must not read as "no host": the worker waits, then
+    /// the timeout names its node and the dropped host.
+    #[tokio::test]
+    async fn host_without_the_workers_node_is_reported_as_dropped() {
+        let discovery = mock_discovery();
+        register_host(discovery.as_ref(), 41, &host_on(1, None)).await;
+        let error = await_single_host(
+            discovery.as_ref(),
+            "ns",
+            Some("node-a"),
+            Duration::from_millis(200),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("worker node \"node-a\""), "{message}");
+        assert!(
+            message.contains("1 advertised host(s) dropped"),
+            "{message}"
+        );
+    }
+
     /// Multi-DGD step 6: one host per node, the worker keeps its node's host.
     #[tokio::test]
     async fn worker_node_selects_the_host_on_that_node() {

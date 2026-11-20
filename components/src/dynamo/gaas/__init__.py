@@ -302,7 +302,11 @@ def _extract_transfer_config(argv: Sequence[str]) -> tuple[list[str], Claim]:
 
 def owner_slot(node: str, tenant: str, lineage: str, guard_index: int) -> str:
     """The CacheOwnerId slot part: the first 128 bits of sha256 over
-    (node, tenant, lineage, guard_index), JSON-encoded so fields cannot run together."""
+    (node, tenant, lineage, guard_index), JSON-encoded so fields cannot run together.
+    Without a node it is the pre-node-scoping id, the guard index as 32 hex digits,
+    so an upgrade does not strand detached owners."""
+    if not node:
+        return f"{guard_index:032x}"
     key = json.dumps([node, tenant, lineage, guard_index], separators=(",", ":"))
     return hashlib.sha256(key.encode()).hexdigest()[:32]
 
@@ -546,6 +550,10 @@ def main(argv: Sequence[str] | None = None, *, ensure_pool: EnsurePool) -> int:
         node=args.node,
     )
     if args.state_agent:
+        if args.node:
+            # The Rust worker selects its host from NODE_NAME alone; keep it equal
+            # to the node the owner id was scoped by.
+            os.environ["NODE_NAME"] = args.node
         # The supervisor's state agent advertises in the base namespace; the
         # operator's per-generation worker suffix would hide it from the worker.
         os.environ.pop("DYN_NAMESPACE_WORKER_SUFFIX", None)
