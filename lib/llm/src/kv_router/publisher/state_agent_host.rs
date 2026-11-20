@@ -1291,6 +1291,418 @@ mod tests {
         agent.shutdown().await.unwrap();
     }
 
+    // `fresh_router_recovers_detached_host_slot` with two agent hosts under one
+    // `kv_state_endpoint` (multi-DGD Walk-through 1, proof claim 1). Host A keeps
+    // a detached owner holding a two-block prefix; host B then attaches the
+    // moved worker W'. The tests assert today's readouts, not the design target.
+    //
+    // Not re-tested: a worker that lists both hosts fails its host selection
+    // with "exactly one live V2 host, found 2", already asserted by
+    // `attachment_owner.rs` `two_advertised_hosts_fail_closed_before_the_deadline`.
+    // today: W' on B cannot select its host (DESIGN step 6). These tests call
+    // each host's `reconcile_owner` directly, below that selection.
+    #[tokio::test]
+    async fn two_agent_hosts_under_one_endpoint_distinct_owners() {
+        two_agent_hosts_under_one_endpoint("multi-dgd-two-hosts-distinct", false).await;
+    }
+
+    #[tokio::test]
+    async fn two_agent_hosts_under_one_endpoint_same_owner() {
+        two_agent_hosts_under_one_endpoint("multi-dgd-two-hosts-same", true).await;
+    }
+
+    async fn two_agent_hosts_under_one_endpoint(namespace: &str, same_owner: bool) {
+        use crate::discovery::kv_state_agent::{
+            KV_STATE_SOURCE_TOPIC_V2, KvStateSourceAdvertisement,
+        };
+        use crate::discovery::{KvSourceMembershipView, KvStateEndpointResolution};
+        use crate::kv_router::indexer::{Indexer, start_state_agent_router};
+        use crate::utils::zmq::{bind_pub_socket, send_multipart};
+        use dynamo_kv_router::indexer::{
+            KvIndexer, KvIndexerMetrics, LowerTierIndexers, LowerTierQueryOptions, MatchDetails,
+            query_lower_tiers_with_options,
+        };
+        use dynamo_kv_router::kv_hints::KvTransferCandidateSource;
+        use dynamo_kv_router::protocols::{
+            ExternalSequenceBlockHash, KvCacheEventData, LocalBlockHash, ResidencyOwner,
+            StorageTier,
+        };
+
+        const GUARD_A: &str = "tcp://node-a-guard:55001";
+        const GUARD_B: &str = "tcp://node-b-guard:55001";
+
+        start_process_request_plane();
+        // The in-memory discovery store is per runtime, so one runtime stands in
+        // for a cluster-wide discovery backend shared by both hosts and the
+        // router. Each host is its own component with its own slots and sockets.
+        let ns = DistributedRuntime::new(
+            Runtime::from_current().unwrap(),
+            DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap()
+        .namespace(namespace)
+        .unwrap();
+        let component_a = ns.component("host-a").unwrap();
+        let component_b = ns.component("host-b").unwrap();
+        let kv_state_endpoint = EndpointId::from(format!("{namespace}.backend.generate").as_str());
+        // Host metrics are not read here; one set serves both hosts.
+        let metrics = HostMetrics::new(&component_a).unwrap();
+        let free_endpoint = || {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let endpoint = format!("tcp://{}", listener.local_addr().unwrap());
+            drop(listener);
+            endpoint
+        };
+
+        let owner_a = owner(4);
+        // today: the owner id is a constant plus the guard index, so W' on B
+        // carries A's owner id (DESIGN step 7). The distinct case models step 7's
+        // proposal: the same slot under another cluster id.
+        let owner_b = if same_owner {
+            owner_a
+        } else {
+            owner_in_cluster(5, 4)
+        };
+
+        // Host A: W attaches, publishes a two-block prefix, then leaves.
+        let raw_endpoint_a = free_endpoint();
+        let raw_a = bind_pub_socket(&raw_endpoint_a).await.unwrap();
+        let worker_a = WorkerWithDpRank::new(17, 4);
+        let mut request_a = intent(
+            &instance("kv_state_agent", 1),
+            instance("producer", 11),
+            owner_a,
+            worker_a,
+            101,
+        );
+        request_a.raw_zmq_endpoint = raw_endpoint_a;
+        request_a.kv_state_endpoint = kv_state_endpoint.clone();
+        request_a.kv_block_size = 4;
+        request_a.router_hint_source = Some(RouterHintSourceMetadata {
+            source_control_endpoint: GUARD_A.to_string(),
+            worker_type: "prefill".to_string(),
+            topology_domains: Default::default(),
+        });
+        let mut slots_a = HashMap::new();
+        let mut sockets_a = HostSockets::new(&component_a, 1, CancellationToken::new()).unwrap();
+        reconcile_owner(
+            &component_a,
+            owner_a,
+            &HashMap::from([(owner_a, HashMap::from([(101, request_a.clone())]))]),
+            &mut slots_a,
+            1,
+            &mut sockets_a,
+            &mut 0,
+            &metrics,
+        )
+        .await
+        .unwrap();
+        assert_eq!(slots_a[&owner_a].lifecycle, SlotLifecycle::Active);
+        let agent_a = slots_a[&owner_a].agent.as_ref().unwrap().clone();
+        let payload = rmp_serde::to_vec_named(&(
+            1.0f64,
+            vec![serde_json::json!({
+                "type": "BlockStored", "block_hashes": [101, 102], "parent_block_hash": null,
+                "token_ids": [10,11,12,13,14,15,16,17], "block_size": 4,
+                "medium": "CPU_PINNED", "ownership": "kvcr", "locality": "LOCAL"
+            })],
+            Some(4i32),
+        ))
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let before = agent_a.status().outbound_cursor;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut sequence = 1u64;
+            while agent_a.status().outbound_cursor == before {
+                send_multipart(
+                    &raw_a,
+                    vec![
+                        request_a.raw_topic.as_bytes().to_vec(),
+                        sequence.to_be_bytes().to_vec(),
+                        payload.clone(),
+                    ],
+                )
+                .await
+                .unwrap();
+                sequence += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("host A did not index framework blocks");
+        reconcile_owner(
+            &component_a,
+            owner_a,
+            &HashMap::new(),
+            &mut slots_a,
+            1,
+            &mut sockets_a,
+            &mut 0,
+            &metrics,
+        )
+        .await
+        .unwrap();
+        assert_eq!(slots_a[&owner_a].lifecycle, SlotLifecycle::Detached);
+        assert!(agent_a.status().attachment.is_none());
+
+        // Host B: W' attaches under the same kv_state_endpoint and stays live.
+        let raw_endpoint_b = free_endpoint();
+        let _raw_b = bind_pub_socket(&raw_endpoint_b).await.unwrap();
+        let worker_b = WorkerWithDpRank::new(18, 4);
+        let mut request_b = intent(
+            &instance("kv_state_agent", 2),
+            instance("producer", 12),
+            owner_b,
+            worker_b,
+            201,
+        );
+        request_b.raw_zmq_endpoint = raw_endpoint_b;
+        request_b.kv_state_endpoint = kv_state_endpoint.clone();
+        request_b.kv_block_size = 4;
+        request_b.router_hint_source = Some(RouterHintSourceMetadata {
+            source_control_endpoint: GUARD_B.to_string(),
+            worker_type: "prefill".to_string(),
+            topology_domains: Default::default(),
+        });
+        let mut slots_b = HashMap::new();
+        let mut sockets_b = HostSockets::new(&component_b, 1, CancellationToken::new()).unwrap();
+        reconcile_owner(
+            &component_b,
+            owner_b,
+            &HashMap::from([(owner_b, HashMap::from([(201, request_b.clone())]))]),
+            &mut slots_b,
+            1,
+            &mut sockets_b,
+            &mut 0,
+            &metrics,
+        )
+        .await
+        .unwrap();
+        // Slot tables are per host: B accepts the owner whatever A holds, and A's
+        // detached owner is untouched.
+        assert_eq!(slots_b[&owner_b].lifecycle, SlotLifecycle::Active);
+        let agent_b = slots_b[&owner_b].agent.as_ref().unwrap().clone();
+        assert!(agent_b.status().attachment.is_some());
+        assert_eq!(slots_a[&owner_a].lifecycle, SlotLifecycle::Detached);
+
+        // Discovery lists both hosts' SOURCE records under the one endpoint topic,
+        // as two records with distinct publisher ids, in both cases.
+        let listed: Vec<KvStateSourceAdvertisement> = component_a
+            .drt()
+            .discovery()
+            .list(DiscoveryQuery::EventSources(
+                EventSourceQuery::endpoint_topic(
+                    kv_state_endpoint.clone(),
+                    KV_STATE_SOURCE_TOPIC_V2,
+                ),
+            ))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|record| match record {
+                DiscoveryInstance::EventSource { metadata, .. } => {
+                    serde_json::from_value(metadata).unwrap()
+                }
+                _ => panic!("expected a SOURCE event-source record"),
+            })
+            .collect();
+        assert_eq!(listed.len(), 2);
+        assert_ne!(listed[0].publisher_id, listed[1].publisher_id);
+        let mut listed_hosts: Vec<(CacheOwnerId, String)> = listed
+            .iter()
+            .map(|source| {
+                (
+                    source.cache_owner_id,
+                    source
+                        .router_hint_source
+                        .as_ref()
+                        .unwrap()
+                        .source_control_endpoint
+                        .clone(),
+                )
+            })
+            .collect();
+        listed_hosts.sort_by(|left, right| left.1.cmp(&right.1));
+        assert_eq!(
+            listed_hosts,
+            vec![
+                (owner_a, GUARD_A.to_string()),
+                (owner_b, GUARD_B.to_string())
+            ]
+        );
+
+        // A fresh router started after both records exist, as in the one-host test.
+        let cancel = CancellationToken::new();
+        let primary = KvIndexer::new(
+            cancel.child_token(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+        );
+        let lower_tier = LowerTierIndexers::new(1, 4);
+        let indexer = Indexer::Single {
+            primary,
+            lower_tier: lower_tier.clone(),
+            approx: None,
+            primary_records_routing_decisions: false,
+            session_updates: None,
+        };
+        // No live workers in membership, as in the one-host test: B's attachment
+        // is live on host B, but W' is not a router member, so B's owner is not
+        // projected onto W'.
+        let (_membership_tx, membership) = tokio::sync::watch::channel(KvSourceMembershipView {
+            serving_endpoint: kv_state_endpoint.clone(),
+            endpoint_resolution: KvStateEndpointResolution::Resolved(kv_state_endpoint.clone()),
+            sources: HashMap::new(),
+            kv_event_publishing_enabled: HashMap::new(),
+            kv_event_source_mode: HashMap::new(),
+            recovery_expected: HashMap::new(),
+        });
+        let (_configs_tx, configs) = tokio::sync::watch::channel(HashMap::new());
+        let router_component = ns.component("router").unwrap();
+        let coordinator = crate::discovery::KvSourceMembershipCoordinator::start(
+            kv_state_endpoint.clone(),
+            configs,
+            router_component.drt().discovery(),
+        );
+        let membership = coordinator.subscribe().with_receiver(membership);
+        let router =
+            start_state_agent_router(router_component, indexer, membership, 4, cancel.clone())
+                .await
+                .unwrap();
+        let hashes = crate::kv_router::publisher::zmq_listener::decode_zmq_kv_batch(vec![
+            Vec::new(),
+            1u64.to_be_bytes().to_vec(),
+            payload,
+        ])
+        .unwrap();
+        // Use the normalizer's exact token hashes rather than duplicating its hashing contract.
+        let mut normalizer = dynamo_kv_router::zmq_wire::ZmqEventNormalizer::new(4);
+        let mut raw_event = hashes.batch.events.into_iter().next().unwrap();
+        if let dynamo_kv_router::zmq_wire::RawKvEvent::BlockStored { ownership, .. } =
+            &mut raw_event
+        {
+            *ownership = None;
+        }
+        let preprocessed = normalizer
+            .preprocess_with_reason(raw_event, worker_a)
+            .unwrap();
+        let normalized = normalizer
+            .normalize_preprocessed(preprocessed, 1, worker_a)
+            .unwrap();
+        let KvCacheEventData::Stored(stored) = normalized.event.data else {
+            panic!("expected Store")
+        };
+        let tokens: Vec<LocalBlockHash> = stored
+            .blocks
+            .iter()
+            .map(|block| block.tokens_hash)
+            .collect();
+        let block_hashes: Vec<ExternalSequenceBlockHash> =
+            stored.blocks.iter().map(|block| block.block_hash).collect();
+        assert_eq!(tokens.len(), 2);
+        let a_key = ResidencyOwner::cache_owner(owner_a).compact_key();
+        let b_key = ResidencyOwner::cache_owner(owner_b).compact_key();
+        let a_source = KvTransferCandidateSource::CacheOwner(a_key);
+        let lookup = || {
+            query_lower_tiers_with_options(
+                &lower_tier,
+                &tokens,
+                &MatchDetails::default(),
+                LowerTierQueryOptions {
+                    retain_kv_transfer_chain: true,
+                },
+            )
+            .remove(&StorageTier::HostPinned)
+            .and_then(|details| details.kv_transfer_candidates)
+        };
+
+        if !same_owner {
+            let candidates = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if let Some(candidates) = lookup()
+                        && candidates
+                            .owner_prefix_blocks
+                            .iter()
+                            .any(|(source, blocks)| *source == a_source && *blocks == 2)
+                        && candidates
+                            .routing_snapshot
+                            .as_ref()
+                            .is_some_and(|snapshot| snapshot.has_router_hint_source(b_key))
+                    {
+                        break candidates;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("router did not list both hosts' owners");
+            // With distinct owner ids the router lists two owners, and for a prefix
+            // only A holds the hint source is A's Guard, not B and not a worker.
+            assert_eq!(candidates.owner_prefix_blocks, vec![(a_source, 2)]);
+            assert_eq!(candidates.block_hashes, block_hashes);
+            let snapshot = candidates.routing_snapshot.as_ref().unwrap();
+            let source_a = snapshot.router_hint_source(a_key).unwrap();
+            assert_eq!(source_a.metadata.source_control_endpoint, GUARD_A);
+            assert_eq!(source_a.attached_worker, None);
+            let source_b = snapshot.router_hint_source(b_key).unwrap();
+            assert_eq!(source_b.metadata.source_control_endpoint, GUARD_B);
+            assert_eq!(source_b.attached_worker, None);
+        } else {
+            // today: two SOURCE records name one CacheOwnerId. The router neither
+            // overwrites, merges nor errors; it keeps the owner unprojected
+            // ("Ambiguous KV state-source incarnations" in
+            // `indexer/recovery/state_agent.rs` `schedule_state_sources`), so it
+            // lists zero owners and hints nothing for A's prefix (DESIGN step 7).
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let fenced = lookup();
+            let a_listed = fenced.as_ref().is_some_and(|candidates| {
+                candidates
+                    .owner_prefix_blocks
+                    .iter()
+                    .any(|(source, _)| *source == a_source)
+                    || candidates
+                        .routing_snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.has_router_hint_source(a_key))
+            });
+            assert!(!a_listed, "two records for one owner must stay unprojected");
+
+            // The ambiguity is the cause: once B's record leaves, the same router
+            // recovers A's detached owner and names A's Guard.
+            agent_b.shutdown().await.unwrap();
+            let candidates = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if let Some(candidates) = lookup()
+                        && candidates
+                            .owner_prefix_blocks
+                            .iter()
+                            .any(|(source, blocks)| *source == a_source && *blocks == 2)
+                    {
+                        break candidates;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("router did not recover A's owner after B's record left");
+            assert_eq!(candidates.owner_prefix_blocks, vec![(a_source, 2)]);
+            assert_eq!(candidates.block_hashes, block_hashes);
+            let source_a = candidates
+                .routing_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.router_hint_source(a_key))
+                .unwrap();
+            assert_eq!(source_a.metadata.source_control_endpoint, GUARD_A);
+        }
+        cancel.cancel();
+        drop(router);
+        agent_a.shutdown().await.unwrap();
+        if !same_owner {
+            agent_b.shutdown().await.unwrap();
+        }
+    }
+
     fn instance(component: &str, instance_id: u64) -> Instance {
         Instance {
             namespace: "ns".to_string(),
@@ -1304,13 +1716,17 @@ mod tests {
     }
 
     fn owner(slot: u8) -> CacheOwnerId {
+        owner_in_cluster(3, slot)
+    }
+
+    fn owner_in_cluster(cluster: u64, slot: u8) -> CacheOwnerId {
         CacheOwnerId::new(
             PoolId::new(
                 IndexerDomainId::new(
                     CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
                     RoutingScopeId::new([2; 16], IdentitySource::Explicit),
                 ),
-                ClusterId::new(3),
+                ClusterId::new(cluster),
             ),
             StableDpSlotId::new([slot; 16], IdentitySource::Explicit),
         )
