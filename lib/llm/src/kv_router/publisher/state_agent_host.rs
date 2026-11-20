@@ -1663,7 +1663,7 @@ mod tests {
             assert_eq!(source_b.metadata.source_control_endpoint, GUARD_B);
             assert_eq!(source_b.attached_worker, None);
         } else {
-            // Before node-scoped ids: two SOURCE records name one CacheOwnerId. The router neither
+            // Without node-scoped ids: two SOURCE records name one CacheOwnerId. The router neither
             // overwrites, merges nor errors; it keeps the owner unprojected
             // ("Ambiguous KV state-source incarnations" in
             // `indexer/recovery/state_agent.rs` `schedule_state_sources`), so it

@@ -252,7 +252,17 @@ async fn await_single_host(
     if timeout.is_zero() {
         return match list_single_host(discovery, namespace, node, &dropped_by_node).await? {
             Some(host) => Ok(host),
-            None => Err(exactly_one_host_error(0)),
+            None => {
+                let dropped = dropped_by_node.load(Ordering::Relaxed);
+                Err(if dropped == 0 {
+                    exactly_one_host_error(0)
+                } else {
+                    anyhow::anyhow!(
+                        "state-agent mode requires exactly one live V2 host, found 0 \
+                         ({dropped} advertised host(s) not on this node)"
+                    )
+                })
+            }
         };
     }
     // The deadline is fixed before any backend I/O: the initial list, watch
@@ -270,7 +280,7 @@ async fn await_single_host(
         tracing::info!(
             namespace,
             worker_node = %node_label,
-            hosts_on_other_nodes = dropped_by_node.load(Ordering::Relaxed),
+            hosts_not_on_this_node = dropped_by_node.load(Ordering::Relaxed),
             timeout_secs = timeout.as_secs(),
             "KV state-agent host is not advertised yet; waiting"
         );
@@ -298,7 +308,7 @@ async fn await_single_host(
             Err(_elapsed) => anyhow::bail!(
                 "no live V2 KV state-agent host appeared within {}s \
                  (topic {KV_STATE_HOST_TOPIC_V2} on {namespace}/{HOST_COMPONENT}; \
-                 worker node {node_label}, {} advertised host(s) dropped for another node; \
+                 worker node {node_label}, {} advertised host(s) not on this node; \
                  set {HOST_DISCOVERY_TIMEOUT_ENV} to adjust the startup wait)",
                 timeout.as_secs(),
                 dropped_by_node.load(Ordering::Relaxed)

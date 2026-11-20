@@ -550,10 +550,9 @@ def main(argv: Sequence[str] | None = None, *, ensure_pool: EnsurePool) -> int:
         node=args.node,
     )
     if args.state_agent:
-        if args.node:
-            # The Rust worker selects its host from NODE_NAME alone; keep it equal
-            # to the node the owner id was scoped by.
-            os.environ["NODE_NAME"] = args.node
+        # The Rust worker selects its host from NODE_NAME alone; keep it equal
+        # to the node the owner id was scoped by (empty means no node filter).
+        os.environ["NODE_NAME"] = args.node or ""
         # The supervisor's state agent advertises in the base namespace; the
         # operator's per-generation worker suffix would hide it from the worker.
         os.environ.pop("DYN_NAMESPACE_WORKER_SUFFIX", None)
