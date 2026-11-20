@@ -942,9 +942,9 @@ mod tests {
         assert!(format!("{error:#}").contains("exactly one live V2 host, found 2"));
     }
     /// A host on another node must not read as "no host": the worker waits, then
-    /// the timeout names its node and the dropped host.
+    /// the timeout names its node and the host not on it.
     #[tokio::test]
-    async fn host_without_the_workers_node_is_reported_as_dropped() {
+    async fn host_without_the_workers_node_is_reported_as_not_on_this_node() {
         let discovery = mock_discovery();
         register_host(discovery.as_ref(), 41, &host_on(1, None)).await;
         let error = await_single_host(
@@ -959,7 +959,7 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("worker node \"node-a\""), "{message}");
         assert!(
-            message.contains("1 advertised host(s) dropped"),
+            message.contains("1 advertised host(s) not on this node"),
             "{message}"
         );
     }
